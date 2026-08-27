@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Heddlework
+GenericName=Agent Development Environment
+Comment=Work with coding-agent sessions, diffs, and durable tasks
+Exec=@HEDDLEWORK_EXEC@
+TryExec=@HEDDLEWORK_EXEC@
+Icon=io.github.monotykamary.heddlework
+Terminal=false
+Categories=Development;IDE;
+Keywords=AI;Agent;Development;Pi;Review;
+StartupNotify=true
+StartupWMClass=heddlework

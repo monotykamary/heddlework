@@ -97,6 +97,17 @@ pnpm build
 ./dist/heddlework /path/to/repository
 ```
 
+### Linux desktop integration
+
+Linux users can install the current unsigned build into their user application menu:
+
+```bash
+pnpm build
+HEDDLEWORK_PI="$(command -v pi)" ./packaging/linux/install-user.sh
+```
+
+The installer uses the standalone executable, a square scalable icon, and an absolute-path launcher so app-grid launches do not depend on the GUI session inheriting Bun, pnpm, or Pi from shell startup files. See [Linux desktop integration](packaging/linux/README.md) for installed paths, GNOME cache guidance, removal, and diagnostic-log precautions.
+
 ### Queue behavior
 
 Submitting while an agent run is active stages the input in Heddlework's editable queue instead of immediately surrendering it to Pi's immutable RPC queue. While idle, ordinary **Enter** still starts immediately, **Option/Alt+Enter** parks work in a paused queue, and **Enter** on an empty composer resumes its oldest row. The collapsed strip is inset like an upside-down checkout bar and tucks behind the composer; expanding it springs upward into a single bounded scroll surface where rows can be edited, removed, steered into the current run, or reordered from their left drag handles.
@@ -135,7 +146,7 @@ HEDDLEWORK_PI=/absolute/path/to/pi pnpm start -- /path/to/repository
 | Variable | Purpose |
 | --- | --- |
 | `HEDDLEWORK_CWD` | Workspace path instead of the positional argument |
-| `HEDDLEWORK_PI` | Absolute Pi executable path |
+| `HEDDLEWORK_PI` | Absolute Pi executable path (recommended for desktop launchers) |
 | `HEDDLEWORK_PROVIDER` | Initial provider passed to Pi |
 | `HEDDLEWORK_MODEL` | Initial model passed to Pi |
 | `HEDDLEWORK_SESSION` | Pi session file to resume |
