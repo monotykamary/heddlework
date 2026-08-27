@@ -53,6 +53,14 @@ class QueueTransport implements AgentTransport {
   }
 }
 
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return
+    await Bun.sleep(5)
+  }
+  throw new Error(`Timed out waiting for ${label}`)
+}
+
 describe('owned workbench queue', () => {
   it('stages stopped submissions without starting Pi and resumes from the parked head', async () => {
     const transport = new QueueTransport()
@@ -68,7 +76,8 @@ describe('owned workbench queue', () => {
       expect(transport.commands.filter((command) => command.type === 'prompt')).toHaveLength(0)
 
       controller.resumeQueue()
-      await Bun.sleep(10)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === 'Start only when resumed')
+        && controller.getSnapshot().queue.items.length === 0, 'the resumed prompt')
       expect(transport.commands.some((command) => command.type === 'new_session')).toBe(true)
       expect(transport.commands.filter((command) => command.type === 'prompt').at(-1)).toMatchObject({ message: 'Start only when resumed' })
       expect(controller.getSnapshot().queue.items).toEqual([])
@@ -106,13 +115,14 @@ describe('owned workbench queue', () => {
       expect(controller.getSnapshot().queue.steering[0]).toBe('/skill:review edited before expansion')
 
       await controller.abort()
-      await Bun.sleep(0)
+      await waitFor(() => controller.getSnapshot().queue.pauseReason === 'abort', 'the aborted queue to pause')
       expect(controller.getSnapshot().queue.paused).toBe(true)
       expect(controller.getSnapshot().queue.pauseReason).toBe('abort')
       expect(transport.commands.filter((command) => command.type === 'prompt')).toHaveLength(2)
 
       controller.resumeQueue()
-      await Bun.sleep(0)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === 'Queued task 20')
+        && !controller.getSnapshot().queue.items.some((item) => item.id === last.id), 'the queue to resume')
       const resumed = transport.commands.filter((command) => command.type === 'prompt').at(-1)!
       expect(resumed).toMatchObject({ type: 'prompt', message: 'Queued task 20' })
       expect('streamingBehavior' in resumed).toBe(false)
@@ -132,12 +142,14 @@ describe('owned workbench queue', () => {
       await controller.submit('Implement after prewalk')
 
       transport.settle()
-      await Bun.sleep(0)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === '/fabric prewalk')
+        && controller.getSnapshot().queue.items.length === 1, 'the first queued prompt')
       expect(transport.commands.filter((command) => command.type === 'prompt').at(-1)).toMatchObject({ message: '/fabric prewalk' })
       expect(controller.getSnapshot().queue.items.map((item) => item.text)).toEqual(['Implement after prewalk'])
 
       transport.settle()
-      await Bun.sleep(0)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === 'Implement after prewalk')
+        && controller.getSnapshot().queue.items.length === 0, 'the second queued prompt')
       expect(transport.commands.filter((command) => command.type === 'prompt').at(-1)).toMatchObject({ message: 'Implement after prewalk' })
       expect(controller.getSnapshot().queue.items).toEqual([])
     } finally {
@@ -160,7 +172,9 @@ describe('owned workbench queue', () => {
       await controller.submit('Implement after controls')
 
       transport.settle()
-      await Bun.sleep(10)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === '/fabric prewalk')
+        && controller.getSnapshot().queue.items.length === 1
+        && controller.getSnapshot().queue.items[0]?.text === 'Implement after controls', 'the queued controls and extension command')
       const controlCommands = transport.commands.filter((command) => ['compact', 'set_model', 'set_thinking_level', 'new_session', 'switch_session'].includes(command.type))
       expect(controlCommands.map((command) => command.type)).toEqual(['compact', 'set_model', 'set_thinking_level', 'new_session', 'switch_session'])
       expect(controlCommands[0]).toMatchObject({ type: 'compact', customInstructions: 'focus on decisions' })
@@ -180,7 +194,8 @@ describe('owned workbench queue', () => {
       await controller.submit('Start')
       controller.queueInput('/new', [{ id: 'image-1', type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png', previewPath: '/tmp/image.png', fileName: 'image.png', size: 5 }])
       transport.settle()
-      await Bun.sleep(0)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === '/new')
+        && controller.getSnapshot().queue.items.length === 0, 'the image-bearing slash prompt')
       expect(transport.commands.filter((command) => command.type === 'new_session')).toHaveLength(0)
       expect(transport.commands.filter((command) => command.type === 'prompt').at(-1)).toMatchObject({
         type: 'prompt',
@@ -200,7 +215,7 @@ describe('owned workbench queue', () => {
       await controller.submit('Start')
       await controller.submit('Do not run after an error')
       transport.settle('error')
-      await Bun.sleep(0)
+      await waitFor(() => controller.getSnapshot().queue.pauseReason === 'error', 'the errored queue to pause')
       expect(controller.getSnapshot().queue.paused).toBe(true)
       expect(controller.getSnapshot().queue.pauseReason).toBe('error')
       expect(controller.getSnapshot().queue.items.map((item) => item.text)).toEqual(['Do not run after an error'])
@@ -209,7 +224,8 @@ describe('owned workbench queue', () => {
       controller.acceptAgentEvent({ type: 'agent_start' })
       controller.acceptAgentEvent({ type: 'agent_end', messages: [{ role: 'assistant', content: [], stopReason: 'stop' }], willRetry: false })
       controller.acceptAgentEvent({ type: 'agent_settled' })
-      await Bun.sleep(0)
+      await waitFor(() => transport.commands.some((command) => command.type === 'prompt' && command.message === 'Do not run after an error')
+        && controller.getSnapshot().queue.items.length === 0, 'the recovered queue prompt')
       expect(controller.getSnapshot().queue.paused).toBe(false)
       expect(transport.commands.filter((command) => command.type === 'prompt').at(-1)).toMatchObject({ message: 'Do not run after an error' })
     } finally {
