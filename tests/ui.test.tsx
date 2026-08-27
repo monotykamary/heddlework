@@ -115,7 +115,7 @@ describeNative('WorkbenchApp', () => {
     const workspaceStack = root.renderer.findByTestId('draft-workspace-stack')!
     const composerLayer = root.renderer.findByTestId('draft-composer-layer')!
     expect(workspaceStack.children.indexOf(workspacePositioner.id)).toBeGreaterThan(workspaceStack.children.indexOf(composerLayer.id))
-    await automation.getByTestId('workspace-chooser-trigger').click()
+    await automation.getByTestId('workspace-chooser-trigger').press('enter')
     root.renderer.flush()
     expect(await automation.getByTestId('workspace-menu').count()).toBe(0)
     expect(await automation.getByTestId('sidebar-session-active').count()).toBe(0)
@@ -291,7 +291,8 @@ describeNative('WorkbenchApp', () => {
       root.renderer.captureScreenshot(screenshot)
       expect(statSync(screenshot).size).toBeGreaterThan(10_000)
     }
-    await automation.getByTestId('tool-row').click()
+    await automation.getByTestId('tool-row').press('enter')
+    root.renderer.flush()
     expect(root.renderer.getPaintedText()).toContain('TOOL CALL')
     expect(await automation.getByTestId('execution-timeline').count()).toBe(1)
     expect(root.renderer.findByTestId('tool-summary-label')?.style.fontFamily).toBe('Menlo')
@@ -299,7 +300,8 @@ describeNative('WorkbenchApp', () => {
     root.renderer.flush()
     expect(root.renderer.findByType('code').length).toBeGreaterThan(0)
     await automation.getByTestId('tool-detail-row').press('enter')
-    await automation.getByTestId('tool-row').click()
+    await automation.getByTestId('tool-row').press('enter')
+    root.renderer.flush()
 
     await automation.getByTestId('toggle-diff').click()
     await Bun.sleep(70)
