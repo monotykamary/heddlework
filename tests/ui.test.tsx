@@ -59,7 +59,7 @@ describeNative('WorkbenchApp', () => {
     const project = basename(workspace)
     const controller = new WorkbenchController(new DemoTransport(), workspace, testControllerDependencies(new PiSessionCatalog({ scope: 'cwd' })))
     controllers.push(controller)
-    const root = createTestRoot()
+    const root = createTestRoot({ width: 1_280, height: 640 })
     const themeManager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark' })
     root.render(<WorkbenchApp controller={controller} presenters={new Map()} ui={createTestUiRegistry(controller)} themeManager={themeManager} />)
     await controller.start()
@@ -500,9 +500,18 @@ describeNative('WorkbenchApp', () => {
     expect(root.renderer.getPaintedText()).not.toContain('Saved threads')
     expect(root.renderer.getPaintedText()).not.toContain('Persistence')
     expect(root.renderer.getPaintedText()).toContain('Alpha')
-    const alphaBounds = await automation.getByTestId('settings-alpha').bounds()
-    expect(alphaBounds.y).toBeGreaterThanOrEqual(52)
-    expect(alphaBounds.y + alphaBounds.height).toBeLessThanOrEqual(sidebarBounds.y + sidebarBounds.height)
+    const settingsScroll = (await automation.getByTestId('settings-scroll').all())[0]!
+    const settingsViewportBounds = await automation.getByTestId('settings-scroll').bounds()
+    let alphaBounds = await automation.getByTestId('settings-alpha').bounds()
+    const overflow = alphaBounds.y + alphaBounds.height - settingsViewportBounds.y - settingsViewportBounds.height
+    if (overflow > 0) {
+      const offset = root.renderer.getScrollOffset(settingsScroll.id)?.[1] ?? 0
+      root.renderer.scrollTo(settingsScroll.id, 0, offset - Math.ceil(overflow))
+      root.renderer.flush()
+      alphaBounds = await automation.getByTestId('settings-alpha').bounds()
+    }
+    expect(alphaBounds.y).toBeGreaterThanOrEqual(settingsViewportBounds.y)
+    expect(alphaBounds.y + alphaBounds.height).toBeLessThanOrEqual(settingsViewportBounds.y + settingsViewportBounds.height + 1)
     if (process.platform === 'darwin') {
       const screenshot = resolve(screenshotDirectory, 'workbench-settings.png')
       root.renderer.captureScreenshot(screenshot)
