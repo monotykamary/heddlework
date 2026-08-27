@@ -120,10 +120,11 @@ export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
     const list = sessionListRef.current
     if (!list) return
     const offset = renderer.getScrollOffset?.(list.id)?.[1] ?? 0
-    const boundsRenderer = renderer as typeof renderer & { getElementBounds?(id: number): number[] | null }
     const windowHeight = renderer.getWindowSize?.().height ?? 0
     const fallbackHeight = windowHeight > 184 ? windowHeight - 184 : 616
-    const viewportHeight = boundsRenderer.getElementBounds?.(list.id)?.[3] || fallbackHeight
+    // NativeRenderer exposes no getElementBounds (that is an automation-only API);
+    // querying it throws a 2s timeout on the production host. Use window-based fallback.
+    const viewportHeight = fallbackHeight
     const next = {
       top: offset < -0.5,
       bottom: viewportHeight > 0 && sessionContentHeight + offset > viewportHeight + 0.5,
