@@ -1,6 +1,7 @@
 import React from 'react'
 import { render } from '@gpuix/react'
 import { resolve } from 'node:path'
+import { createWindowOptions } from './window-options.ts'
 import { WorkbenchKernel } from './core/kernel.ts'
 import { WorkbenchApp } from './ui/app.tsx'
 import { ThemeManager } from './ui/theme-manager.ts'
@@ -64,16 +65,7 @@ globalThis.__heddleworkRuntime = runtime
 
 render(
   <WorkbenchApp controller={controller} presenters={kernel.contributions(toolPresenterSlot)} ui={ui} themeManager={themeManager} />,
-  {
-    title: 'Heddlework',
-    width: 1240,
-    height: 820,
-    titlebarTransparent: true,
-    windowBackground: process.platform === 'darwin' ? 'blurred' : 'opaque',
-    trafficLightX: 16,
-    trafficLightY: 17,
-    debugFrameOverlay: debugOverlay(),
-  },
+  createWindowOptions(process.platform, debugOverlay()),
 )
 
 themeManager.start()
