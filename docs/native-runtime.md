@@ -53,6 +53,32 @@ To consume the built packages locally, the script prints a `bun install
 record any runtime switch in `native-runtime.json` before it becomes the
 committed contract.
 
+## Linux application identity
+
+`createWindowOptions('linux', ...)` sets `appId` to
+`io.github.monotykamary.heddlework`, matching the desktop entry filename,
+icon name, and `StartupWMClass` in `packaging/linux/`. macOS and Windows keep
+ their existing window options unchanged.
+
+The patch exposes `appId?: string` in GPUIX's native `WindowOptions`, inherited
+by React's `RenderOptions`. React forwards it to `renderer.init`; N-API maps it
+to Rust's `app_id`, which `to_gpui_window_options` forwards to GPUI. GPUI uses
+that identity for Wayland `xdg_toplevel.set_app_id` and X11 `WM_CLASS`. Omitting
+it preserves GPUI's platform default. Changing only Heddlework's TypeScript
+options is insufficient: the native addon must also be rebuilt with this patch.
+
+`check:native` reports a missing `native.window-app-id` declaration as a desktop
+degradation, not a startup failure. This static declaration check does **not**
+prove that the installed binary or a live compositor uses the value. After
+building and installing the patched runtime, launch under Wayland and inspect
+`WAYLAND_DEBUG=1 bun start` for a `set_app_id` request containing the ID. On
+Hyprland, `hyprctl clients -j` should show the same `class`; under X11, select
+the window with `xprop WM_CLASS`. Confirm launcher grouping and the installed
+icon visually. Native window-option mapping tests live in the GPUIX patch.
+
+Heddlework's test command is scoped to `./tests` so the ignored `external/gpuix`
+source checkout does not contribute upstream tests to `bun run check`.
+
 ## Updating the runtime
 
 1. Bump `@gpuix/react` / `@gpuix/native` in `package.json` (`bun install`).

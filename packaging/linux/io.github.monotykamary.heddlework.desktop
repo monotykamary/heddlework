@@ -11,4 +11,4 @@ Terminal=false
 Categories=Development;IDE;
 Keywords=AI;Agent;Development;Pi;Review;
 StartupNotify=true
-StartupWMClass=heddlework
+StartupWMClass=io.github.monotykamary.heddlework

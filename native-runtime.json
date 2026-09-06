@@ -2,7 +2,7 @@
   "heddlework": {
     "commit": "bfc2b2b",
     "patch": "patches/gpuix-0.7.0-heddlework.patch",
-    "patchSha256": "d0c2b53eea11cb854a0b8da1e04b53043a497694fcb9d13cfc6ba90f44ee3272"
+    "patchSha256": "b152238053a8528d79b6737e91e388f44512d8816cfc8a0b385b47d3b1da0bde"
   },
   "gpuix": {
     "react": "0.7.0",
@@ -29,6 +29,14 @@
     { "target": "x86_64-pc-windows-msvc", "package": "@gpuix/native-win32-x64-msvc", "addon": "gpuix-native.win32-x64-msvc.node" }
   ],
   "capabilities": [
+    {
+      "id": "native.window-app-id",
+      "kind": "native-export",
+      "export": "appId?: string",
+      "component": "desktop",
+      "required": false,
+      "note": "Without appId support, Linux compositor grouping and desktop icon matching fall back to the runtime default. This declaration probe is not a live compositor check."
+    },
     {
       "id": "native.test-renderer",
       "kind": "native-export",

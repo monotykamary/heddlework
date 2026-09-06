@@ -114,6 +114,24 @@ describe('verifyNativeRuntime', () => {
     expect(renderer?.ok).toBe(true)
   })
 
+  it('reports missing appId declarations and recognizes the patched native window option', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    const appId = loadNativeRuntimeManifest(repoRoot).capabilities.find((entry) => entry.id === 'native.window-app-id')
+    expect(appId).toBeDefined()
+    manifest.capabilities.push(appId!)
+    writeFileSync(join(root, 'native-runtime.json'), JSON.stringify(manifest))
+    const missing = verifyNativeRuntime({ root })
+    expect(missing.ok).toBe(true)
+    expect(missing.checks.find((check) => check.id === 'capability.native.window-app-id')).toMatchObject({
+      ok: false, required: false, component: 'desktop',
+    })
+    writeFileSync(join(root, 'node_modules/@gpuix/native/index.d.ts'),
+      'export declare function hasTestGpuixRenderer(): boolean\nexport interface WindowOptions { appId?: string }\n')
+    const patched = verifyNativeRuntime({ root })
+    expect(patched.checks.find((check) => check.id === 'capability.native.window-app-id')?.ok).toBe(true)
+  })
+
   it('fails when the required platform addon is missing', () => {
     const root = makeFixtureRoot()
     seedRuntimeFixture(root, { includeAddon: false })
