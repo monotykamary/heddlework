@@ -31,8 +31,10 @@
   "capabilities": [
     {
       "id": "native.window-app-id",
-      "kind": "native-export",
-      "export": "appId?: string",
+      "kind": "react-type",
+      "package": "native",
+      "scope": "WindowOptions",
+      "patterns": ["appId?: string"],
       "component": "desktop",
       "required": false,
       "note": "Without appId support, Linux compositor grouping and desktop icon matching fall back to the runtime default. This declaration probe is not a live compositor check."

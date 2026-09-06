@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -28,8 +28,8 @@ jobs:
         env:
           HEDDLEWORK_WITHOUT_CEF: '1'
 
-  linux-portable:
-    runs-on: ubuntu-latest
+  macos-portable:
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -37,7 +37,7 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
-      - run: bun run check
+      - run: bun run typecheck
       - run: bun run check:native
       - run: bun run build
         env:

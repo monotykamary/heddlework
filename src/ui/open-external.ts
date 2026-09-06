@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
+import { requestPortalDirectory } from './portal-file-chooser.ts'
 
 export interface DirectoryPickerCommand {
   command: string
@@ -60,18 +61,28 @@ export function directoryPickerCommands(platform: NodeJS.Platform = process.plat
 }
 
 export async function pickWorkspaceDirectory(): Promise<WorkspaceDirectoryPick> {
+  if (process.platform === 'linux') {
+    const portal = await requestPortalDirectory()
+    if (portal.status === 'cancelled' || portal.status === 'selected') {
+      // A portal dismissal is a deliberate cancel and never pops a second
+      // fallback dialog; only an unavailable warn degrades onward.
+      return portal.path ? { path: portal.path } : {}
+    }
+    // Portal was unavailable or unresponsive; degrade through zenity/kdialog.
+  }
   const pickers = directoryPickerCommands()
   if (pickers.length === 0) return { error: 'No folder picker is available on this system' }
   const failures: string[] = []
   for (const picker of pickers) {
     const selected = await captureProcessOutput(picker.command, picker.args)
     if (selected !== undefined) {
-      const path = selected.trim()
-      return path ? { path: resolve(path) } : {}
+      // Empty (but clean) output means the user dismissed the dialog; treat it
+      // as an intentional cancel rather than cascading to the next picker.
+      return selected.trim() ? { path: resolve(selected.trim()) } : {}
     }
     failures.push(picker.command)
   }
-  return { error: `Could not open a folder picker (${failures.join(', ')} not available)` }
+  return { error: 'Could not open a folder picker (' + failures.join(', ') + ' unavailable)' }
 }
 
 export function systemTargetCommand(target: string, platform: NodeJS.Platform = process.platform): DirectoryPickerCommand {
