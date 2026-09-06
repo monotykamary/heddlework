@@ -1,6 +1,8 @@
 import React from 'react'
 import { render, resetRender } from '@gpuix/react'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { verifyNativeRuntime } from './core/native-runtime.ts'
 import { createWindowOptions } from './window-options.ts'
 import { WorkbenchKernel } from './core/kernel.ts'
 import { WorkbenchApp } from './ui/app.tsx'
@@ -133,6 +135,24 @@ process.prependListener('uncaughtException', handleUncaughtException)
 process.prependListener('unhandledRejection', handleUnhandledRejection)
 process.once('SIGINT', shutdown)
 process.once('SIGTERM', shutdown)
+
+// Report the native runtime contract before rendering; an incompatible runtime
+// must be named here instead of failing later during layout or paint. Packaged
+// builds bundle the addon and have no node_modules to probe, so this is a
+// development-checkout guard.
+try {
+  if (existsSync(resolve(import.meta.dir, '..', 'node_modules'))) {
+    const runtime = verifyNativeRuntime()
+    for (const check of runtime.checks.filter((entry) => !entry.ok)) {
+      const message = `[heddlework] native runtime ${check.required ? 'error' : 'degradation'}: ${check.detail}`
+      const remediation = `  → ${check.remediation ?? ''}`
+      if (check.required) console.error(`${message}\n${remediation}`)
+      else console.warn(`${message}\n${remediation}`)
+    }
+  }
+} catch {
+  // Best-effort startup probe; bun run check:native reports the full picture.
+}
 
 render(
   <WorkbenchApp controller={controller} flows={flows} terminals={terminals} browsers={browsers} presenters={kernel.contributions(toolPresenterSlot)} ui={ui} themeManager={themeManager} onQuit={shutdown} />,

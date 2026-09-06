@@ -473,7 +473,7 @@ async function waitForTerminalReady(service: TerminalSessionService, sessionId: 
 }
 
 function instrumentRenderer(renderer: ReturnType<typeof createRenderer>, telemetry: TerminalPipelineTelemetry): void {
-  const setTerminalFrame = renderer.setTerminalFrame.bind(renderer)
+  const setTerminalFrame = renderer.setTerminalFrame!.bind(renderer)
   renderer.setTerminalFrame = (elementId, metadata, cells) => {
     const startedAt = performance.now()
     try {
