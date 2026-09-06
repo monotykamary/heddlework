@@ -10,6 +10,7 @@ model: **the harness is authoritative for its own execution and transcripts; Hed
 state and never invents a second agent loop.**
 
 ## Verification gates (run these, don't guess)
+
 ```bash
 bun install --frozen-lockfile   # never mutate the lockfile by hand
 bun run typecheck               # tsc --noEmit over src, scripts, tests
@@ -18,9 +19,11 @@ bun run check:native            # native-runtime capability probe
 bun run check:ai-slop           # objective machine-generated-artifact gate
 bun run build                   # unsigned executable (set HEDDLEWORK_WITHOUT_CEF=1 for browser-free)
 ```
+
 `bun run check` == typecheck + tests and is the project's primary quality gate.
 
 ## Invariants & traps
+
 - **Harness authority**: never let UI code own harness truth. Streaming replaces transcript rows
   only after the authoritative `get_messages` settles.
 - **Cordis composability**: every registration/listener/timer/process an owner attaches must attach
@@ -34,5 +37,6 @@ bun run build                   # unsigned executable (set HEDDLEWORK_WITHOUT_CE
 - `docs/` explains the native terminal/browser, so read the relevant doc before touching those systems.
 
 ## Deliverable hygiene
+
 - Run the full `check` suite before pushing. Prefer squash for fork-local review PRs.
 - Keep required-check names stable; rulesets match them exactly.

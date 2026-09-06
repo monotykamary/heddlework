@@ -1,4 +1,4 @@
-## Summary
+# Summary
 
 <!-- One paragraph: what this changes and why. Short/vague titles and bodies are flagged by the
      AI-quality gate and slow reviewers. -->

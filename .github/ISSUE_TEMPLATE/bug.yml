@@ -48,5 +48,5 @@ body:
     attributes:
       label: Confirmations
       options:
-        - label: I can reproduce on a fresh clone of `main`
+        - label: I can reproduce on a clean checkout of the version/commit I submitted
           required: true

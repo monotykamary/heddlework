@@ -22,14 +22,16 @@ const CM_CLOSE = String.fromCharCode(62, 62, 62, 62, 62, 62, 62) + " ";
 const WARN = "warn";
 const INFO = "info";
 
-// Concrete, foolproof markers. Keep this small and literal so we never punish
-// legitimate prose or an intentional TODO tracker.
+// Concrete, foolproof markers. Patterns carry NO /g flag on purpose: RegExp.prototype.test()
+// with /g mutates lastIndex and silently skips matches in the next file, so we rely on stateless
+// default behavior. The checker's own source is exempt: it must literally name these artifacts.
+const SELF_PATH = "scripts/check-ai-slop.ts";
 const LEFTOVER_PATTERNS: Array<[RegExp, string]> = [
-  [/\b(?:TODO|FIXME|HACK|XXX)\b(?::|\s|$)/g, "leftover TODO/FIXME/HACK/XXX marker"],
-  [/\bYOUR\s+(?:NAME|CODE|TEXT|MESSAGE)?\s*HERE\b/gi, "generated placeholder (YOUR ... HERE)"],
+  [/\b(?:TODO|FIXME|HACK|XXX)\b(?::|\s|$)/, "leftover TODO/FIXME/HACK/XXX marker"],
+  [/\bYOUR\s+(?:NAME|CODE|TEXT|MESSAGE)?\s*HERE\b/i, "generated placeholder (YOUR ... HERE)"],
   [/\bLorem ipsum\b/gi, "placeholder lorem-ipsum copy"],
-  [/\bconsole\.log\b/g, "stray console.log"],
-  [/\bdebugger;?\b/g, "stray debugger statement"],
+  [/\bconsole\.log\b/, "stray console.log"],
+  [/\bdebugger;?\b/, "stray debugger statement"],
 ];
 
 function escapeReg(s: string): string {
@@ -72,30 +74,42 @@ function treeFiles(): string[] {
 }
 
 const findings: Array<{ severity: string; file: string; detail: string }> = [];
-const useDiff = Boolean(process.env.DIFF_FILE || process.env.DIFF_BASE);
 
-if (useDiff) {
-  const diff = diffText();
-  for (const [file, added] of addedLinesOf(diff)) {
-    if (added.includes(CM_OPEN) || added.includes(CM_CLOSE)) {
-      findings.push({ severity: ERROR, file, detail: "unresolved merge conflict marker" });
-    }
-    for (const [re, label] of LEFTOVER_PATTERNS) {
-      if (re.test(added)) findings.push({ severity: WARN, file, detail: label });
-    }
-    if (file.endsWith(".ts") && added.split("\n").length > 500) {
-      findings.push({ severity: WARN, file, detail: "large addition (>500 lines) — split or justify" });
+// Scope. Leftover patterns (TODO/console.log/debugger/…) only ever apply to ADDED lines:
+// an unfixed whole-tree scan would flag every pre-existing script/src console.log as slop,
+// which is noise, not signal. So:
+//   - DIFF_BASE / DIFF_FILE  -> scan added lines of that PR/hunk diff (the CI gate)
+//   - otherwise              -> scan the working-tree diff v HEAD, i.e. what you are about
+//                               to commit. Whole-tree mode then checks ONLY merge markers
+//                               (a real, never-intended artifact) for safety.
+const scope = process.env.DIFF_FILE || process.env.DIFF_BASE ? "diff" : "worktree";
+
+for (const [file, addedSrc] of addedLinesOf(diffText())) {
+  if (file === SELF_PATH) continue; // don't self-flag
+  if (addedSrc.includes(CM_OPEN) || addedSrc.includes(CM_CLOSE)) {
+    findings.push({ severity: ERROR, file, detail: "unresolved merge conflict marker" });
+  }
+  for (const [re, label] of LEFTOVER_PATTERNS) {
+    if (re.test(addedSrc)) findings.push({ severity: WARN, file, detail: label });
+  }
+  if (file.endsWith(".ts") && addedSrc.split("\n").length > 500) {
+    findings.push({ severity: WARN, file, detail: "large addition (>500 lines) — split or justify" });
+  }
+}
+if (scope === "worktree") {
+  for (const file of treeFiles()) {
+    if (file === SELF_PATH) continue;
+    const src = readFileSync(file, "utf8");
+    if (src.includes(CM_OPEN) || src.includes(CM_CLOSE)) {
+      findings.push({ severity: ERROR, file, detail: "unresolved merge conflict marker in tree" });
     }
   }
+}
+if (scope === "diff") {
   const title = process.env.PR_TITLE || "";
   if (title.length < 8) findings.push({ severity: WARN, file: "(PR)", detail: "missing/short PR title" });
   const body = process.env.PR_BODY || "";
   if (body.trim().length < 20) findings.push({ severity: INFO, file: "(PR)", detail: "thin PR description (<20 chars)" });
-} else {
-  for (const file of treeFiles()) {
-    const src = readFileSync(file, "utf8");
-    if (src.includes(CM_OPEN)) findings.push({ severity: ERROR, file, detail: "unresolved merge conflict marker" });
-  }
 }
 
 let errors = 0, warnings = 0, info = 0;
@@ -107,7 +121,7 @@ for (const f of findings) {
   ch(`[${f.severity}] ${f.file}: ${f.detail}`);
 }
 
-console.log(`\ncheck-ai-slop: scope=${useDiff ? "diff" : "tree"} errors=${errors} warnings=${warnings} info=${info}`);
+console.log(`\ncheck-ai-slop: scope=${scope} errors=${errors} warnings=${warnings} info=${info}`);
 if (errors > 0) process.exit(1);
 if (warnings > 0) process.exit(2);
 process.exit(0);

@@ -25,6 +25,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0   # need the base commit for an accurate diff
+          # pull_request code must never see the checkout token; scan runs PR-owned script
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.0
@@ -36,8 +38,14 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
+          set +e               # exit 2 = warnings is informational, not a failure
           bun scripts/check-ai-slop.ts
-          echo "slop_exit=$?" >> "$GITHUB_OUTPUT"
+          slop_exit=$?
+          set -e
+          echo "slop_exit=$slop_exit" >> "$GITHUB_OUTPUT"
+          if [ "$slop_exit" -ne 0 ] && [ "$slop_exit" -ne 1 ] && [ "$slop_exit" -ne 2 ]; then
+            exit "$slop_exit"   # unexpected codes still fail the check
+          fi
       - name: Summarize
         run: |
           echo "check exited ${{ steps.slop.outputs.slop_exit }} (0=clean, 2=warnings)"
