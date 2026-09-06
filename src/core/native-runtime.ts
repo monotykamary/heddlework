@@ -12,6 +12,8 @@ export interface NativeRuntimeCapability {
   kind: 'native-export' | 'react-type'
   export?: string
   patterns?: string[]
+  /** The package whose declarations a react-type probe searches; defaults to "react". */
+  package?: 'react' | 'native'
   /** Restrict a react-type probe to the body of one interface, e.g. "MotionStyle". */
   scope?: string
   component: string
@@ -69,8 +71,31 @@ export function platformTargetKey(platform: string, arch: string): string {
   return `${platform}-${arch}`
 }
 
+function assertManifestShape(value: unknown, root: string): void {
+  const invalid = (reason: string): Error => new Error(`native-runtime.json is malformed: ${reason}`)
+  const target = value as NativeRuntimeManifest
+  if (!target || typeof target !== 'object')
+    throw invalid('expected an object')
+  if (!Array.isArray(target.targets) || target.targets.some((entry) => !entry || !entry.target || !entry.package || !entry.addon))
+    throw invalid('targets must be an array of { target, package, addon } objects')
+  if (!Array.isArray(target.capabilities))
+    throw invalid('capabilities must be an array')
+  for (const capability of target.capabilities) {
+    if (!capability || !capability.id || !capability.component || typeof capability.required !== 'boolean')
+      throw invalid(`capability ${capability?.id ?? '(unnamed)'} lacks id, component, or required`)
+    if (capability.kind === 'native-export' && !capability.export?.trim())
+      throw invalid(`native-export capability ${capability.id} must declare a non-empty export name`)
+    if (capability.kind === 'react-type' && (!capability.patterns || capability.patterns.length === 0))
+      throw invalid(`react-type capability ${capability.id} must list at least one pattern`)
+    if (capability.kind && capability.kind !== 'native-export' && capability.kind !== 'react-type')
+      throw invalid(`capability ${capability.id} has unknown kind ${String(capability.kind)}`)
+  }
+}
+
 export function loadNativeRuntimeManifest(root = repoRootDefault): NativeRuntimeManifest {
-  return JSON.parse(readFileSync(join(root, 'native-runtime.json'), 'utf8')) as NativeRuntimeManifest
+  const parsed = JSON.parse(readFileSync(join(root, 'native-runtime.json'), 'utf8')) as unknown
+  assertManifestShape(parsed, root)
+  return parsed as NativeRuntimeManifest
 }
 
 export function sha256File(path: string): string {
@@ -94,6 +119,41 @@ function interfaceBody(source: string, name: string): string {
   if (bodyStart === -1) return ''
   const end = source.indexOf('\n}', bodyStart)
   return end === -1 ? source.slice(bodyStart) : source.slice(bodyStart, end)
+}
+
+function declaresModuleExport(dts: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp('export\\s+(?:declare\\s+)?(?:function|const|class|interface|type|var|let|enum)\\s+' + escaped + '\\b').test(dts)
+}
+
+function satisfiesVersion(installed: string, constraint: string): boolean {
+  const parse = (part: string): number[] => part.split('.').map((n) => parseInt(n, 10) || 0)
+  const cmp = (a: number[], b: number[]): number => {
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const diff = (a[i] ?? 0) - (b[i] ?? 0)
+      if (diff !== 0) return diff
+    }
+    return 0
+  }
+  const constraints = constraint.split(/\s*[&|]{1,2}\s*/)
+  return constraints.every((single) => {
+    single = single.trim()
+    if (single === '*') return true
+    const m = single.match(/^(>=|<=|>|<|=|^)?v?(.+)$/)
+    if (!m) return false
+    const op = m[1] ?? '='
+    const targetText = m[2] ?? ''
+    const target = parse(targetText)
+    const current = parse(installed)
+    const result = cmp(current, target)
+    if (op === '>=') return result >= 0
+    if (op === '>') return result > 0
+    if (op === '<=') return result <= 0
+    if (op === '<') return result < 0
+    if (op === '^') return (current[0] ?? 0) >= (target[0] ?? 0) && result >= 0
+    if (op === '~') return (current[0] ?? 0) === (target[0] ?? 0) && (current[1] ?? 0) === (target[1] ?? 0) && result >= 0
+    return result === 0
+  })
 }
 
 function remediationFor(manifest: NativeRuntimeManifest, capability: NativeRuntimeCapability): string {
@@ -152,28 +212,22 @@ export function verifyNativeRuntime(options: VerifyNativeRuntimeOptions = {}): N
     })
   }
 
-  const reactPackagePath = join(root, 'node_modules/@gpuix/react/package.json')
-  if (existsSync(reactPackagePath)) {
-    const installed = (JSON.parse(readFileSync(reactPackagePath, 'utf8')) as { version?: string }).version
-    const ok = installed === manifest.gpuix.react
+  const packageVersionCheck = (id: string, packageRel: string, pinned: string, label: string): void => {
+    const pkgPath = join(root, 'node_modules', packageRel, 'package.json')
+    if (!existsSync(pkgPath)) {
+      checks.push({ id, ok: false, required: true, component: 'core', detail: `${label} is not installed`, remediation: 'Run bun install --frozen-lockfile before verifying the native runtime.' })
+      return
+    }
+    const installed = (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }).version
+    const ok = installed === pinned
     checks.push({
-      id: 'gpuix.version',
-      ok,
-      required: true,
-      component: 'core',
-      detail: ok ? `installed @gpuix/react@${installed} matches the manifest` : `installed @gpuix/react@${installed} does not match manifest ${manifest.gpuix.react}`,
+      id, ok, required: true, component: 'core',
+      detail: ok ? `installed ${label}@${installed} matches the manifest` : `installed ${label}@${installed} does not match manifest ${pinned}`,
       ...(ok ? {} : { remediation: 'Update native-runtime.json and bun.lock together so the manifest and lockfile agree.' }),
     })
-  } else {
-    checks.push({
-      id: 'gpuix.version',
-      ok: false,
-      required: true,
-      component: 'core',
-      detail: 'node_modules/@gpuix/react is not installed',
-      remediation: 'Run bun install --frozen-lockfile before verifying the native runtime.',
-    })
   }
+  packageVersionCheck('gpuix.react.version', '@gpuix/react', manifest.gpuix.react, '@gpuix/react')
+  packageVersionCheck('gpuix.native.version', '@gpuix/native', manifest.gpuix.native, '@gpuix/native')
 
   const target = manifest.targets.find((entry) => entry.target === platformTargetKey(platform, arch))
   if (!target) {
@@ -198,24 +252,37 @@ export function verifyNativeRuntime(options: VerifyNativeRuntimeOptions = {}): N
     })
   }
 
-  const reactDts = collectDtsFiles(join(root, 'node_modules/@gpuix/react'))
+  if (manifest.toolchain?.bun) {
+    const ok = satisfiesVersion(String(Bun.version ?? ''), manifest.toolchain.bun)
+    checks.push({
+      id: 'toolchain.bun', ok, required: true, component: 'core',
+      detail: ok ? `Bun ${Bun.version} satisfies ${manifest.toolchain.bun}` : `Bun ${Bun.version} does not satisfy ${manifest.toolchain.bun}`,
+      ...(ok ? {} : { remediation: `Install a Bun matching ${manifest.toolchain.bun} and re-run bun install --frozen-lockfile.` }),
+    })
+  }
+
+    const reactDts = collectDtsFiles(join(root, 'node_modules/@gpuix/react'))
   const nativeDtsPath = join(root, 'node_modules/@gpuix/native/index.d.ts')
+  const nativeDts = existsSync(nativeDtsPath) ? readFileSync(nativeDtsPath, 'utf8') : ''
   for (const capability of manifest.capabilities) {
     let ok = false
     let detail: string
     if (capability.kind === 'native-export') {
-      const declared = existsSync(nativeDtsPath) && readFileSync(nativeDtsPath, 'utf8').includes(capability.export ?? '')
+      const declared = capability.export ? declaresModuleExport(nativeDts, capability.export) : false
       ok = declared
       detail = declared
         ? `installed @gpuix/native declares ${capability.export}`
-        : `installed @gpuix/native does not declare ${capability.export}`
+        : `installed @gpuix/native does not export ${capability.export}`
     } else {
       const patterns = capability.patterns ?? []
-      const haystack = reactDts.map((path) => readFileSync(path, 'utf8')).join('\n')
+      const haystack = capability.package === 'native'
+        ? nativeDts
+        : reactDts.map((path) => readFileSync(path, 'utf8')).join('\n')
       const window = capability.scope ? interfaceBody(haystack, capability.scope) : haystack
       const missing = patterns.filter((pattern) => !window.includes(pattern))
       ok = patterns.length > 0 && missing.length === 0
-      const where = capability.scope ? `${capability.scope} in installed @gpuix/react types` : 'installed @gpuix/react types'
+      const wherePkg = capability.package === 'native' ? '@gpuix/native' : '@gpuix/react'
+      const where = capability.scope ? `${capability.scope} in installed ${wherePkg} types` : `installed ${wherePkg} types`
       detail = ok
         ? `${where} declare ${patterns.join(', ')}`
         : `${where} lack ${missing.join(', ')}`

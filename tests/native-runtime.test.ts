@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -63,6 +63,7 @@ function seedRuntimeFixture(
 
   mkdirSync(join(root, 'node_modules/@gpuix/native'), { recursive: true })
   writeFileSync(join(root, 'node_modules/@gpuix/native/index.d.ts'), 'export declare function hasTestGpuixRenderer(): boolean\n')
+  writeFileSync(join(root, 'node_modules/@gpuix/native/package.json'), JSON.stringify({ version: '0.7.0' }))
   mkdirSync(join(root, 'node_modules/@gpuix/react/dist'), { recursive: true })
   writeFileSync(join(root, 'node_modules/@gpuix/react/package.json'), JSON.stringify({ version: '0.7.0' }))
   writeFileSync(
@@ -144,5 +145,51 @@ describe('verifyNativeRuntime', () => {
     const patch = report.checks.find((check) => check.id === 'patch.checksum')
     expect(patch?.ok).toBe(false)
     expect(patch?.detail).toContain(manifest.heddlework.patchSha256)
+  })
+
+  it('rejects a malformed manifest instead of trusting the shape', () => {
+    const root = makeFixtureRoot()
+    seedRuntimeFixture(root)
+    // Corrupt a capability after seeding: drop the export name from a native-export.
+    const manifestPath = join(root, 'native-runtime.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.capabilities = manifest.capabilities.filter((cap: { kind: string }) => cap.kind !== 'native-export')
+    manifest.capabilities.push({ id: 'native.empty', kind: 'native-export', export: '', component: 'core', required: true })
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+
+    const report = verifyNativeRuntime({ root })
+    expect(report.ok).toBe(false)
+    const load = report.checks.find((check) => check.id === 'manifest.load')
+    expect(load?.ok).toBe(false)
+  })
+
+  it('fails a required check when @gpuix/native does not match the manifest pin', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    writeFileSync(join(root, 'node_modules/@gpuix/native/package.json'), JSON.stringify({ version: '0.6.9' }))
+    expect(manifest).toBeDefined()
+    const report = verifyNativeRuntime({ root })
+
+    expect(report.ok).toBe(false)
+    const check = report.checks.find((c) => c.id === 'gpuix.native.version')
+    expect(check?.ok).toBe(false)
+    expect(check?.required).toBe(true)
+  })
+
+  it('does not treat a class method mentioned in index.d.ts as a module export', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    // native-export name that only exists as a class method, not a module function.
+    manifest.capabilities = [
+      ...manifest.capabilities,
+      { id: 'native.terminal-frame', kind: 'native-export', export: 'setTerminalFrame', component: 'terminal', required: false },
+    ]
+    writeFileSync(join(root, 'native-runtime.json'), JSON.stringify(manifest))
+    writeFileSync(join(root, 'node_modules/@gpuix/native/index.d.ts'), 'export declare class GpuixRenderer { setTerminalFrame(id: number): void }\n')
+
+    const report = verifyNativeRuntime({ root })
+    const check = report.checks.find((c) => c.id === 'capability.native.terminal-frame')
+    expect(check?.ok).toBe(false)
+    expect(check?.required).toBe(false)
   })
 });

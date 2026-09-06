@@ -48,6 +48,7 @@
     {
       "id": "render.browser-options",
       "kind": "react-type",
+      "package": "native",
       "patterns": ["browserRootCachePath", "nativeBrowserEnabled"],
       "component": "browser",
       "required": false,
@@ -57,7 +58,7 @@
       "id": "render.motion-style",
       "kind": "react-type",
       "scope": "MotionStyle",
-      "patterns": ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"],
+      "patterns": ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom", "flexGrow"],
       "component": "ui",
       "required": false,
       "note": "Animated padding and flexGrow properties added by the patch; the published runtime ignores unknown motion keys."

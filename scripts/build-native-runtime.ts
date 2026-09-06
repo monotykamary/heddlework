@@ -25,6 +25,13 @@ const gpuixDir = resolve(process.env.HEDDLEWORK_GPUIX_DIR ?? join(repoRoot, 'ext
 const zedDir = join(gpuixDir, 'zed')
 const patchPath = join(repoRoot, manifest.heddlework.patch)
 
+function runQuiet(command: string[], cwd: string): string {
+  // Non-throwing variant: returns stdout (plus stderr) whatever the exit code.
+  const result = Bun.spawnSync(command, { cwd, stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode === 0) return new TextDecoder().decode(result.stdout)
+  return new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
+}
+
 function run(command: string[], cwd: string): string {
   const result = Bun.spawnSync(command, { cwd, stdout: 'pipe', stderr: 'pipe' })
   const stderr = new TextDecoder().decode(result.stderr).trim()
@@ -47,6 +54,10 @@ function ensureCheckout(dir: string, remote: string, commit: string, label: stri
     if (head === commit) {
       console.log(`  ${label}: already at ${commit.slice(0, 12)}`)
       return
+    }
+    const dirty = runQuiet(['git', 'status', '--porcelain'], dir).trim()
+    if (dirty) {
+      throw new Error(`${label} checkout would discard uncommitted changes in ${dir}: ${dirty.split('\n')[0]}. Commit, stash, or use a separate HEDDLEWORK_GPUIX_DIR.`)
     }
     console.log(`  ${label}: moving ${head.slice(0, 12)} to ${commit.slice(0, 12)}`)
   }
@@ -87,8 +98,15 @@ try {
       git(['apply', '--check', sectionPath], section.cwd)
       console.log(`  ${section.label}: patch section applies cleanly`)
     } else {
-      git(['apply', sectionPath], section.cwd)
-      console.log(`  ${section.label}: patch section applied`)
+      // Idempotent: a section that is already applied reverses cleanly, so a
+      // second --apply / --build run skips it instead of erroring on git apply.
+      const reverse = Bun.spawnSync(['git', 'apply', '--reverse', '--check', sectionPath], { cwd: section.cwd, stdout: 'pipe', stderr: 'pipe' })
+      if (reverse.exitCode === 0) {
+        console.log(`  ${section.label}: patch section already applied`)
+      } else {
+        git(['apply', sectionPath], section.cwd)
+        console.log(`  ${section.label}: patch section applied`)
+      }
     }
   }
 } finally {

@@ -18,7 +18,7 @@ declare module '@gpuix/native' {
     nativeBrowserEngine(): string
     nativeBrowserProfileIsolation(): string
     nativeBrowserError(): string | null
-    setTerminalFrame(elementId: number, metadata: string, cells: Buffer): void
+    setTerminalFrame?(elementId: number, metadata: string, cells: Buffer): void
   }
 }
 
