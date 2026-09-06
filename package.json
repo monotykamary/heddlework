@@ -30,6 +30,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run typecheck && bun run test",
+    "check:native": "bun scripts/verify-native-runtime.ts",
     "build": "bun scripts/build.ts",
     "smoke:browser": "bun scripts/smoke-browser.ts",
     "benchmark:terminal": "bun scripts/benchmark-terminal.ts && bun scripts/benchmark-terminal-ui.tsx",

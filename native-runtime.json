@@ -1,0 +1,66 @@
+{
+  "heddlework": {
+    "commit": "bfc2b2b",
+    "patch": "patches/gpuix-0.7.0-heddlework.patch",
+    "patchSha256": "d0c2b53eea11cb854a0b8da1e04b53043a497694fcb9d13cfc6ba90f44ee3272"
+  },
+  "gpuix": {
+    "react": "0.7.0",
+    "native": "0.7.0",
+    "source": "https://github.com/remorses/gpuix",
+    "sourceCommit": "a24b4a42eb516c7b940eb8d34ecebb077df623bd",
+    "sourceTag": "@gpuix/react@0.7.0",
+    "zedSubmodule": {
+      "remote": "https://github.com/remorses/zed.git",
+      "branch": "gpuix",
+      "commit": "8b94defe56992b3ca4ffd4853ace741d8168111a"
+    },
+    "patchSections": [
+      "gpuix repository root (packages/native, packages/react)",
+      "zed submodule crates/gpui"
+    ]
+  },
+  "toolchain": {
+    "bun": ">=1.3.0"
+  },
+  "targets": [
+    { "target": "x86_64-unknown-linux-gnu", "package": "@gpuix/native-linux-x64-gnu", "addon": "gpuix-native.linux-x64-gnu.node" },
+    { "target": "aarch64-apple-darwin", "package": "@gpuix/native-darwin-arm64", "addon": "gpuix-native.darwin-arm64.node" },
+    { "target": "x86_64-pc-windows-msvc", "package": "@gpuix/native-win32-x64-msvc", "addon": "gpuix-native.win32-x64-msvc.node" }
+  ],
+  "capabilities": [
+    {
+      "id": "native.test-renderer",
+      "kind": "native-export",
+      "export": "hasTestGpuixRenderer",
+      "component": "core",
+      "required": true,
+      "note": "Terminal test fixtures register only when the TestGpuixRenderer is available."
+    },
+    {
+      "id": "native.terminal-frame",
+      "kind": "native-export",
+      "export": "setTerminalFrame",
+      "component": "terminal",
+      "required": false,
+      "note": "Raw terminal frame uploads skip base64 encoding; Heddlework falls back to the frame-prop path when absent."
+    },
+    {
+      "id": "render.browser-options",
+      "kind": "react-type",
+      "patterns": ["browserRootCachePath", "nativeBrowserEnabled"],
+      "component": "browser",
+      "required": false,
+      "note": "Browser render options added by the patch; the embedded browser cannot initialize without them."
+    },
+    {
+      "id": "render.motion-style",
+      "kind": "react-type",
+      "scope": "MotionStyle",
+      "patterns": ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"],
+      "component": "ui",
+      "required": false,
+      "note": "Animated padding and flexGrow properties added by the patch; the published runtime ignores unknown motion keys."
+    }
+  ]
+}

@@ -8,7 +8,8 @@ const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null'
 export async function loadWorkspaceDiff(cwd: string): Promise<WorkspaceDiff> {
   try {
     const branch = (await runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
-    const trackedPatch = await runGit(cwd, ['diff', '--no-ext-diff', '--unified=3', 'HEAD', '--'])
+    // Pin the classic a/ and b/ prefixes: git 2.55+ may default to c/ and w/.
+    const trackedPatch = await runGit(cwd, ['diff', '--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--unified=3', 'HEAD', '--'])
     const numstat = await runGit(cwd, ['diff', '--numstat', 'HEAD', '--'])
     const untracked = (await runGit(cwd, ['ls-files', '--others', '--exclude-standard', '--']))
       .split('\n')
@@ -17,7 +18,7 @@ export async function loadWorkspaceDiff(cwd: string): Promise<WorkspaceDiff> {
       .slice(0, MAX_UNTRACKED_FILES)
 
     const untrackedPatches = await Promise.all(untracked.map(async (path) => {
-      const result = await runGit(cwd, ['diff', '--no-index', '--no-ext-diff', '--unified=3', '--', NULL_DEVICE, path], [0, 1])
+      const result = await runGit(cwd, ['diff', '--no-index', '--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--unified=3', '--', NULL_DEVICE, path], [0, 1])
       return normalizeNoIndexPatch(result, cwd, path)
     }))
     const patch = [trackedPatch, ...untrackedPatches].filter(Boolean).join('\n')

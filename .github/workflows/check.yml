@@ -23,6 +23,22 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: bun run check:native
+      - run: bun run build
+        env:
+          HEDDLEWORK_WITHOUT_CEF: '1'
+
+  linux-portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run check:native
       - run: bun run build
         env:
           HEDDLEWORK_WITHOUT_CEF: '1'
