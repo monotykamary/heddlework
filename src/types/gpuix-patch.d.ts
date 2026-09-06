@@ -6,6 +6,8 @@ import type { EventPayload, StyleDesc } from '@gpuix/react'
 
 declare module '@gpuix/native' {
   interface WindowOptions {
+    /** Linux desktop identity, forwarded to GPUI for Wayland app_id and X11 WM_CLASS. */
+    appId?: string
     /** Parent directory for persistent Chromium profiles; consumed before the first <browser> mounts. */
     browserRootCachePath?: string
     /** Opt out of native browser initialization before the renderer starts. */

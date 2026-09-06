@@ -43,4 +43,4 @@ The launcher does not redirect output into a file. Run it from a terminal when d
 
 Install `io.github.monotykamary.heddlework.desktop` after replacing `@HEDDLEWORK_EXEC@` with the package's absolute launcher path. Install `media/heddlework-icon.svg` as `io.github.monotykamary.heddlework.svg` in the platform icon theme.
 
-`StartupWMClass=heddlework` is a best-effort X11 hint. GPUIX 0.5.1 does not expose GPUI's application-ID option, so reliable Wayland dock grouping requires an upstream API addition.
+`StartupWMClass` matches the window `appId` (`io.github.monotykamary.heddlework`) set through GPUIX window options, so Wayland app grouping and the X11 `WM_CLASS` hint line up with the desktop entry and icon. GPUIX 0.7.0 as published does not expose GPUI's application-ID option; the patched runtime from `patches/gpuix-0.7.0-heddlework.patch` does, so this identity requires building or consuming the patched native runtime.

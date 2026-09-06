@@ -28,6 +28,7 @@ export function createWindowOptions(
 
   return {
     ...common,
+    ...(platform === 'linux' ? { appId: 'io.github.monotykamary.heddlework' } : {}),
     windowBackground: 'opaque',
   }
 }

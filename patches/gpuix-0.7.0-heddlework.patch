@@ -1047,7 +1047,7 @@ index e3dba86..3f30ca8 100644
  [build-dependencies]
  napi-build = "2"
 diff --git a/packages/native/index.d.ts b/packages/native/index.d.ts
-index 170109d..caca0b2 100644
+index 170109d..8dbf1a4 100644
 --- a/packages/native/index.d.ts
 +++ b/packages/native/index.d.ts
 @@ -29,6 +29,7 @@ export declare class GpuixRenderer {
@@ -1085,7 +1085,16 @@ index 170109d..caca0b2 100644
    /**
     * The offscreen window size, so `useWindowSize()` reports the same numbers
     * under test as in a real window instead of falling back to a default.
-@@ -522,6 +536,13 @@ export interface WindowOptions {
+@@ -507,6 +521,8 @@ export interface WindowOptions {
+    * takes that from the executable, and only a `.app` bundle changes it.
+    */
+   appName?: string
++  /** Linux desktop identity: Wayland app_id and X11 WM_CLASS. */
++  appId?: string
+   width?: number
+   height?: number
+   minWidth?: number
+@@ -522,6 +538,13 @@ export interface WindowOptions {
     * same as `"transparent"` when this is unset.
     */
    windowBackground?: string
@@ -5858,7 +5867,7 @@ index eb719b8..055a5cd 100644
      fn disabled_initial_state_starts_at_the_target() {
          let now = Instant::now();
 diff --git a/packages/native/src/renderer.rs b/packages/native/src/renderer.rs
-index d66ab63..7e5ac58 100644
+index d66ab63..189e84a 100644
 --- a/packages/native/src/renderer.rs
 +++ b/packages/native/src/renderer.rs
 @@ -1020,15 +1020,33 @@ impl GpuixRenderer {
@@ -6072,7 +6081,16 @@ index d66ab63..7e5ac58 100644
  pub(crate) fn mouse_button_to_u32(button: gpui::MouseButton) -> u32 {
      match button {
          gpui::MouseButton::Left => 0,
-@@ -5482,6 +5619,11 @@ pub struct WindowOptions {
+@@ -5469,6 +5606,8 @@ pub struct WindowOptions {
+     /// `title`. It does NOT set the title of the application menu itself: macOS
+     /// takes that from the executable, and only a `.app` bundle changes it.
+     pub app_name: Option<String>,
++    /// Linux desktop identity: Wayland app_id and X11 WM_CLASS.
++    pub app_id: Option<String>,
+     pub width: Option<f64>,
+     pub height: Option<f64>,
+     pub min_width: Option<f64>,
+@@ -5482,6 +5621,11 @@ pub struct WindowOptions {
      /// `"opaque"` | `"transparent"` | `"blurred"`. `transparent: true` is the
      /// same as `"transparent"` when this is unset.
      pub window_background: Option<String>,
@@ -6084,7 +6102,15 @@ index d66ab63..7e5ac58 100644
      pub traffic_light_x: Option<f64>,
      pub traffic_light_y: Option<f64>,
      /// Give the window key focus when it opens. `false` opens it behind the
-@@ -5506,6 +5648,8 @@ impl Default for WindowOptions {
+@@ -5497,6 +5641,7 @@ impl Default for WindowOptions {
+         Self {
+             title: Some("GPUIX".to_string()),
+             app_name: None,
++            app_id: None,
+             width: Some(800.0),
+             height: Some(600.0),
+             min_width: None,
+@@ -5506,6 +5651,8 @@ impl Default for WindowOptions {
              transparent: Some(false),
              titlebar_transparent: Some(false),
              window_background: None,
@@ -6093,7 +6119,37 @@ index d66ab63..7e5ac58 100644
              traffic_light_x: None,
              traffic_light_y: None,
              focus: Some(true),
-@@ -5945,6 +6089,14 @@ mod window_options_tests {
+@@ -5544,6 +5691,7 @@ fn to_gpui_window_options(
+     };
+     gpui::WindowOptions {
+         window_bounds: Some(window_bounds),
++        app_id: options.app_id.clone(),
+         titlebar: Some(gpui::TitlebarOptions {
+             title: Some(title.into()),
+             appears_transparent: titlebar_transparent,
+@@ -5907,6 +6055,21 @@ mod window_options_tests {
+         to_gpui_window_options(&options, bounds)
+     }
+ 
++    #[test]
++    fn app_id_is_forwarded_without_using_the_window_title() {
++        let gpui_options = mapped(WindowOptions {
++            title: Some("A different window title".to_string()),
++            app_id: Some("io.github.monotykamary.heddlework".to_string()),
++            ..WindowOptions::default()
++        });
++        assert_eq!(gpui_options.app_id.as_deref(), Some("io.github.monotykamary.heddlework"));
++    }
++
++    #[test]
++    fn omitted_app_id_preserves_the_platform_default() {
++        assert_eq!(mapped(WindowOptions::default()).app_id, None);
++    }
++
+     #[test]
+     fn defaults_open_a_focused_visible_window() {
+         let gpui_options = mapped(WindowOptions::default());
+@@ -5945,6 +6108,14 @@ mod window_options_tests {
          assert!(gpui_options.focus);
      }
  
