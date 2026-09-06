@@ -31,6 +31,7 @@
     "test": "bun test ./tests",
     "check": "bun run typecheck && bun run test",
     "check:native": "bun scripts/verify-native-runtime.ts",
+    "check:ai-slop": "bun scripts/check-ai-slop.ts",
     "build": "bun scripts/build.ts",
     "smoke:browser": "bun scripts/smoke-browser.ts",
     "benchmark:terminal": "bun scripts/benchmark-terminal.ts && bun scripts/benchmark-terminal-ui.tsx",

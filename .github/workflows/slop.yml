@@ -1,0 +1,52 @@
+name: ai-slop
+
+# Informational hygiene gate: surfaces deterministic machine-generated artifacts on PRs.
+# NOT a required check. errors=1 blocks (unresolved conflict markers); warnings=2 pass but loud.
+# The real authority stays the project's own gates in check.yml; this only guards obvious slop.
+
+on:
+  # trigger always so PRs are never left without a status; path-filtering happens per-job, not workflow-level
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-slop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # need the base commit for an accurate diff
+          # pull_request code must never see the checkout token; scan runs PR-owned script
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - name: Detect slop
+        id: slop
+        env:
+          # pass event fields via env, never via shell interpolation
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set +e               # exit 2 = warnings is informational, not a failure
+          bun scripts/check-ai-slop.ts
+          slop_exit=$?
+          set -e
+          echo "slop_exit=$slop_exit" >> "$GITHUB_OUTPUT"
+          if [ "$slop_exit" -ne 0 ] && [ "$slop_exit" -ne 1 ] && [ "$slop_exit" -ne 2 ]; then
+            exit "$slop_exit"   # unexpected codes still fail the check
+          fi
+      - name: Summarize
+        run: |
+          echo "check exited ${{ steps.slop.outputs.slop_exit }} (0=clean, 2=warnings)"
+          echo "Blocking failures fail the check; warnings are informational."

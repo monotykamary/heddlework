@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a crash, regression, or incorrect behavior
+title: "[Bug]: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report. Be specific and include how to reproduce.
+  - type: input
+    id: version
+    attributes:
+      label: Heddlework version / commit
+      description: From `git rev-parse HEAD`, or the tagged release
+      placeholder: "e.g. 0cce9d…"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, GPU, display server (X11/Wayland), native runtime probe output if relevant
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact actions from a clean state
+      placeholder: "1. … 2. … 3. …"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error/backtrace (if any)
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmations
+      options:
+        - label: I can reproduce on a clean checkout of the version/commit I submitted
+          required: true

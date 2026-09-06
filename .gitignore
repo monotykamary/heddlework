@@ -4,3 +4,6 @@ dist/
 .DS_Store
 screenshots/
 external/
+.pi/
+*.env
+.env.*

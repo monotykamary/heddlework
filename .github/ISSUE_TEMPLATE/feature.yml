@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a capability or improvement
+title: "[Feature]: "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is missing or hard today
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested approach
+      description: Enough shape that reviewers can react; a sketch is fine
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Scope / boundary
+      description: What it does and does not change (harness-authority, GPUIX patch, packaging)
+    validations:
+      required: false
