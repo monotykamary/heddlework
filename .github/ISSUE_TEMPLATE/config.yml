@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Development & verification docs
+    url: https://github.com/ryan-brosas/heddlework/blob/main/AGENTS.md
+    about: Verification commands and invariants live in AGENTS.md
