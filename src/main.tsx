@@ -3,7 +3,8 @@ import { nativeAppearanceAdapter, type SubscribeSystemAppearance } from './linux
 import * as nativeRuntime from '@gpuix/native'
 import { pickWorkspaceDirectory } from './ui/open-external.ts'
 import React from 'react'
-import { render, resetRender } from '@gpuix/react'
+import { createRenderer, render, resetRender, startFrameLoop } from '@gpuix/react'
+import { nativeDirectoryPickerAdapter, type OpenDirectoryDialog } from './linux/native-directory-picker.ts'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { verifyNativeRuntime } from './core/native-runtime.ts'
@@ -33,6 +34,7 @@ import { browserSessionToken, createBrowserPlugin } from './browser/plugin.ts'
 
 interface RuntimeHandle {
   kernel: WorkbenchKernel
+  directoryRenderer?: ReturnType<typeof createRenderer>
   dispose(): Promise<void>
 }
 
@@ -51,8 +53,17 @@ if (previous) await previous.dispose()
 const subscribeNativeAppearance = nativeAppearanceAdapter(nativeRuntime as typeof nativeRuntime & {
   subscribeSystemAppearance?: SubscribeSystemAppearance
 })
+let directoryRenderer = previous?.directoryRenderer
+const nativeDirectoryPicker = process.platform === 'linux' ? nativeDirectoryPickerAdapter(
+  nativeRuntime as typeof nativeRuntime & { openDirectoryDialog?: OpenDirectoryDialog },
+  () => {
+    if (!directoryRenderer) throw new Error('The invoking window is unavailable')
+    return directoryRenderer
+  },
+) : undefined
 const desktop = process.platform === 'linux' ? new LinuxDesktopIntegration({
   ...(subscribeNativeAppearance ? { subscribeNativeAppearance } : {}),
+  ...(nativeDirectoryPicker ? { nativeDirectoryPicker } : {}),
 }) : undefined
 const pickDirectory = desktop ? async (signal?: AbortSignal) => {
   const result = await desktop.pickDirectory(signal)
@@ -94,6 +105,7 @@ const flows = kernel.get(flowRuntimeToken)
 const ui = kernel.get(workbenchUiRegistryToken)
 const terminals = kernel.get(terminalSessionToken)
 const browsers = kernel.get(browserSessionToken)
+let directoryFrameLoop: ReturnType<typeof startFrameLoop> | undefined
 let disposed = false
 const handleUncaughtException = (error: unknown): void => {
   shutdown(isGpuixWindowCloseRace(error) ? undefined : error)
@@ -112,6 +124,7 @@ const runtime: RuntimeHandle = {
     process.off('unhandledRejection', handleUnhandledRejection)
     themeManager.dispose()
     desktop?.dispose()
+    directoryFrameLoop?.stop()
     await kernel.dispose()
   },
 }
@@ -177,9 +190,19 @@ try {
   // Best-effort startup probe; bun run check:native reports the full picture.
 }
 
+if (nativeDirectoryPicker && !directoryRenderer) {
+  directoryRenderer = createRenderer()
+  directoryRenderer.init({
+    ...createWindowOptions(process.platform, debugOverlay(), browsers.nativeProfileRoot() ?? '', browsers.canInitializeNativeBrowser()),
+    ...(browserSmokeUrl ? { focus: false, show: false } : {}),
+  })
+}
+if (directoryRenderer) runtime.directoryRenderer = directoryRenderer
+
 render(
   <WorkbenchApp controller={controller} flows={flows} terminals={terminals} browsers={browsers} presenters={kernel.contributions(toolPresenterSlot)} ui={ui} themeManager={themeManager} pickDirectory={pickDirectory} onQuit={shutdown} />,
   {
+    ...(directoryRenderer ? { renderer: directoryRenderer } : {}),
     ...createWindowOptions(
       process.platform,
       debugOverlay(),
@@ -190,6 +213,8 @@ render(
     onTerminated: shutdown,
   },
 )
+
+if (directoryRenderer) directoryFrameLoop = startFrameLoop(directoryRenderer, { onTerminated: shutdown })
 
 desktop?.start()
 themeManager.start()

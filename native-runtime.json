@@ -2,7 +2,7 @@
   "heddlework": {
     "commit": "bfc2b2b",
     "patch": "patches/gpuix-0.7.0-heddlework.patch",
-    "patchSha256": "a98f18a32129cd6555231237625b42aa018ad1bd2f49f6c2c09347d77971f8c5"
+    "patchSha256": "c45bd8934ce6581550e0b16edb349bd2e7e9fc1e63707c900177e77edaae09c6"
   },
   "gpuix": {
     "react": "0.7.0",
@@ -95,6 +95,14 @@
       "component": "ui",
       "required": false,
       "note": "Animated padding and flexGrow properties added by the patch; the published runtime ignores unknown motion keys."
+    },
+    {
+      "id": "native.portal-file-chooser",
+      "kind": "native-export",
+      "export": "openDirectoryDialog",
+      "component": "desktop",
+      "required": false,
+      "note": "Optional window-parented XDG directory chooser. Missing binding or confirmed native termination permits CLI fallback; uncertain termination blocks competing dialogs. Export detection does not prove live parenting or portal availability."
     },
     {
       "id": "native.system-appearance",

@@ -5,11 +5,12 @@ import { requestPortalDirectory, type PortalPickResult } from '../ui/portal-file
 import { directoryPickerCommands, runDirectoryPicker } from '../ui/open-external.ts'
 import { abortable, throwIfAborted } from './process.ts'
 import type { SubscribeSystemAppearance, SystemAppearanceEvent } from './native-appearance.ts'
+import type { NativeDirectoryPicker } from './native-directory-picker.ts'
 
 export interface LinuxDesktopSnapshot {
   appearance: ResolvedTheme
   appearanceBackend: 'initializing' | 'native' | 'monitor' | 'poll'
-  pickerBackend: 'unprobed' | 'cli-portal' | 'fallback-dialog' | 'unavailable'
+  pickerBackend: 'unprobed' | 'native-portal' | 'cli-portal' | 'fallback-dialog' | 'unavailable'
   degradations: readonly string[]
 }
 export class LinuxDesktopIntegration {
@@ -25,6 +26,7 @@ export class LinuxDesktopIntegration {
     portal?: (signal: AbortSignal) => Promise<PortalPickResult>
     dialog?: typeof runDirectoryPicker
     pollIntervalMs?: number
+    nativeDirectoryPicker?: NativeDirectoryPicker
     subscribeNativeAppearance?: SubscribeSystemAppearance
     nativeSetupTimeoutMs?: number
   } = {}) {
@@ -149,6 +151,18 @@ export class LinuxDesktopIntegration {
     for (const previous of this.#operations) previous.abort()
     this.#operations.add(operation)
     try {
+      if (this.options.nativeDirectoryPicker) {
+        const result = await abortable(this.options.nativeDirectoryPicker.pick(operation.signal), operation.signal)
+        throwIfAborted(operation.signal)
+        if (result.status !== 'unavailable') {
+          this.#publish({ pickerBackend: 'native-portal' })
+          return result
+        }
+        if (!result.safeToFallback) {
+          this.#publish({ pickerBackend: 'unavailable' })
+          return { status: 'unavailable', error: result.reason }
+        }
+      }
       const portal = await abortable((this.options.portal ?? (signal => requestPortalDirectory({}, signal)))(operation.signal), operation.signal)
       if (portal.status !== 'unavailable') { this.#publish({ pickerBackend: 'cli-portal' }); return portal }
       for (const command of directoryPickerCommands('linux')) {
@@ -167,6 +181,7 @@ export class LinuxDesktopIntegration {
     if (this.#disposed) return
     this.#disposed = true
     for (const operation of this.#operations) operation.abort()
+    this.options.nativeDirectoryPicker?.dispose()
     while (this.#cleanup.length) { try { this.#cleanup.pop()!() } catch {} }
     this.#listeners.clear()
   }

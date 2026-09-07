@@ -149,3 +149,51 @@ GNOME and KDE desktop sessions were not exercised; Hyprland and private D-Bus
 results must not be presented as acceptance for those desktops. The locally
 installed addon must be rebuilt/reinstalled after dependency replacement;
 Bun watch alone does not reload it.
+
+## Native Linux directory chooser
+
+The optional `native.portal-file-chooser` capability exposes
+`openDirectoryDialog(renderer, { title }, listener)`, returning an immediate
+disposal handle whose `closed` promise settles independently of result delivery
+with `closed` or `uncertain`. The listener receives at most one terminal
+result: `selected`, `cancelled`, or `unavailable` with a `safeToFallback` flag.
+There is no synchronous callback and no fixed human-interaction timeout. The
+bounded phases are connection setup, the portal open call (which may time out
+after a dialog has opened), and the close IPC; dialog cancellation after the
+open has no fixed timeout and requires `Request.Close`.
+
+Requests are window-parented through the invoking GPUIX renderer (Wayland
+export / X11 identifier machinery) and driven over the XDG Desktop Portal
+`FileChooser` interface with a single selection. The response is observed
+before the opening call, correlated by request path, token, and portal sender.
+Cancellation issues a portal `Request.Close`; a dropped future alone does not
+close a portal dialog. Portal-owner loss is a terminal transport failure and is
+not replayed.
+
+`uncertain` cleanup - for example when a close cannot be confirmed - blocks
+both CLI fallback and any competing request for the provider lifetime, because
+a timed-out open may already have opened a dialog. Confirmed cleanup authorizes
+the existing CLI portal and fallback-dialog sequence via
+`src/linux/desktop-integration.ts`; a missing binding degrades to that same
+sequence. Caller abort rejects with `AbortError` and never falls through.
+User cancellation never triggers fallback.
+
+The TypeScript adapter is `src/linux/native-directory-picker.ts`; selection
+validation accepts only normalized local file URIs and rejects remote
+authorities, unsupported schemes, malformed escapes, and relative paths.
+
+Native code requires rebuilding and explicitly restarting the app; Bun watch
+does not reload an addon. Run the controlled private-session probe against an
+explicitly selected addon:
+
+```sh
+dbus-run-session -- bun scripts/probe-portal-file-chooser.ts /path/to/rebuilt-addon.node
+```
+
+The probe covers observe-before-call ordering, request-path and token
+correlation, selection and cancellation mapping, malformed responses, URI edge
+cases, disposal and close confirmation, close-failure uncertainty, portal-owner
+loss, listener self-disposal, and environment teardown. Caller abort and
+supersession ordering are the TypeScript adapter's contract and are covered by
+`tests/native-directory-picker*.test.ts`, not by the native probe. It requires
+`/usr/bin/python3` with PyGObject and `gdbus`, as with the appearance probe.
