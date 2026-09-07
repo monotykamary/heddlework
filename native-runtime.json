@@ -2,7 +2,7 @@
   "heddlework": {
     "commit": "bfc2b2b",
     "patch": "patches/gpuix-0.7.0-heddlework.patch",
-    "patchSha256": "b152238053a8528d79b6737e91e388f44512d8816cfc8a0b385b47d3b1da0bde"
+    "patchSha256": "a98f18a32129cd6555231237625b42aa018ad1bd2f49f6c2c09347d77971f8c5"
   },
   "gpuix": {
     "react": "0.7.0",
@@ -17,16 +17,28 @@
     },
     "patchSections": [
       "gpuix repository root (packages/native, packages/react)",
-      "zed submodule crates/gpui"
+      "zed submodule crates/gpui, platform backends, crates/gpui_linux and crates/gpui_platform"
     ]
   },
   "toolchain": {
     "bun": ">=1.3.0"
   },
   "targets": [
-    { "target": "x86_64-unknown-linux-gnu", "package": "@gpuix/native-linux-x64-gnu", "addon": "gpuix-native.linux-x64-gnu.node" },
-    { "target": "aarch64-apple-darwin", "package": "@gpuix/native-darwin-arm64", "addon": "gpuix-native.darwin-arm64.node" },
-    { "target": "x86_64-pc-windows-msvc", "package": "@gpuix/native-win32-x64-msvc", "addon": "gpuix-native.win32-x64-msvc.node" }
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "package": "@gpuix/native-linux-x64-gnu",
+      "addon": "gpuix-native.linux-x64-gnu.node"
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "package": "@gpuix/native-darwin-arm64",
+      "addon": "gpuix-native.darwin-arm64.node"
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "package": "@gpuix/native-win32-x64-msvc",
+      "addon": "gpuix-native.win32-x64-msvc.node"
+    }
   ],
   "capabilities": [
     {
@@ -34,7 +46,9 @@
       "kind": "react-type",
       "package": "native",
       "scope": "WindowOptions",
-      "patterns": ["appId?: string"],
+      "patterns": [
+        "appId?: string"
+      ],
       "component": "desktop",
       "required": false,
       "note": "Without appId support, Linux compositor grouping and desktop icon matching fall back to the runtime default. This declaration probe is not a live compositor check."
@@ -59,7 +73,10 @@
       "id": "render.browser-options",
       "kind": "react-type",
       "package": "native",
-      "patterns": ["browserRootCachePath", "nativeBrowserEnabled"],
+      "patterns": [
+        "browserRootCachePath",
+        "nativeBrowserEnabled"
+      ],
       "component": "browser",
       "required": false,
       "note": "Browser render options added by the patch; the embedded browser cannot initialize without them."
@@ -68,10 +85,24 @@
       "id": "render.motion-style",
       "kind": "react-type",
       "scope": "MotionStyle",
-      "patterns": ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom", "flexGrow"],
+      "patterns": [
+        "paddingLeft",
+        "paddingRight",
+        "paddingTop",
+        "paddingBottom",
+        "flexGrow"
+      ],
       "component": "ui",
       "required": false,
       "note": "Animated padding and flexGrow properties added by the patch; the published runtime ignores unknown motion keys."
+    },
+    {
+      "id": "native.system-appearance",
+      "kind": "native-export",
+      "export": "subscribeSystemAppearance",
+      "component": "desktop",
+      "required": false,
+      "note": "Optional raw XDG Settings subscription. Missing binding or unavailable portal falls back to the appearance monitor and polling. Declaration detection does not prove live portal availability."
     }
   ]
 }

@@ -4,10 +4,11 @@ import type { ResolvedTheme } from '../ui/theme.ts'
 import { requestPortalDirectory, type PortalPickResult } from '../ui/portal-file-chooser.ts'
 import { directoryPickerCommands, runDirectoryPicker } from '../ui/open-external.ts'
 import { abortable, throwIfAborted } from './process.ts'
+import type { SubscribeSystemAppearance, SystemAppearanceEvent } from './native-appearance.ts'
 
 export interface LinuxDesktopSnapshot {
   appearance: ResolvedTheme
-  appearanceBackend: 'monitor' | 'poll'
+  appearanceBackend: 'initializing' | 'native' | 'monitor' | 'poll'
   pickerBackend: 'unprobed' | 'cli-portal' | 'fallback-dialog' | 'unavailable'
   degradations: readonly string[]
 }
@@ -24,8 +25,20 @@ export class LinuxDesktopIntegration {
     portal?: (signal: AbortSignal) => Promise<PortalPickResult>
     dialog?: typeof runDirectoryPicker
     pollIntervalMs?: number
+    subscribeNativeAppearance?: SubscribeSystemAppearance
+    nativeSetupTimeoutMs?: number
   } = {}) {
-    this.#snapshot = { appearance: this.#resolve(), appearanceBackend: 'poll', pickerBackend: 'unprobed', degradations: [] }
+    // M3 deliberately uses the built-in default during asynchronous native setup;
+    // `initializing` distinguishes it from an observed desktop preference without
+    // blocking the first render on gsettings or portal availability.
+    this.#snapshot = { appearance: options.subscribeNativeAppearance ? 'dark' : this.#resolve(), appearanceBackend: options.subscribeNativeAppearance ? 'initializing' : 'poll', pickerBackend: 'unprobed', degradations: [] }
+  }
+  #appearanceDiagnostics(reasons: string[]): void {
+    this.#publish({ degradations: [
+      ...this.#snapshot.degradations.filter(reason => !reason.startsWith('appearance-')),
+      ...reasons,
+      ...this.#snapshot.degradations.filter(reason => reason === 'appearance-monitor-unavailable'),
+    ] })
   }
   #resolve(): ResolvedTheme { return this.options.resolveAppearance?.() ?? detectSystemTheme('linux') }
   getSnapshot = (): LinuxDesktopSnapshot => this.#snapshot
@@ -44,30 +57,73 @@ export class LinuxDesktopIntegration {
   start(): void {
     if (this.#started || this.#disposed) return
     this.#started = true
-    const refresh = () => { if (!this.#disposed) this.#publish({ appearance: this.#resolve() }) }
+    let stopFallback: (() => void) | undefined
+    const fallback = (reason: string) => {
+      this.#appearanceDiagnostics([reason])
+      stopFallback ??= this.#startFallback()
+    }
+    this.#cleanup.push(() => { stopFallback?.(); stopFallback = undefined })
+    const subscribe = this.options.subscribeNativeAppearance
+    if (!subscribe) { fallback('appearance-native-unavailable'); return }
+    let retired = false
+    let subscription: ReturnType<SubscribeSystemAppearance> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const retire = () => {
+      retired = true
+      if (timer) clearTimeout(timer)
+      subscription?.dispose()
+      subscription = undefined
+    }
+    const unavailable = (reason: string) => {
+      if (retired || this.#disposed) return
+      retire()
+      fallback(reason)
+    }
+    const receive = (event: SystemAppearanceEvent) => {
+      if (retired || this.#disposed) return
+      if (timer) clearTimeout(timer)
+      if (event.status === 'unavailable') { unavailable('appearance-native-failed'); return }
+      if (event.preference === 'none') { fallback('appearance-native-no-preference'); return }
+      stopFallback?.()
+      stopFallback = undefined
+      this.#publish({ appearance: event.preference, appearanceBackend: 'native', degradations: this.#snapshot.degradations.filter(reason => !reason.startsWith('appearance-')) })
+    }
+    this.#cleanup.push(retire)
+    timer = setTimeout(() => unavailable('appearance-native-timeout'), this.options.nativeSetupTimeoutMs ?? 6000)
+    timer.unref?.()
+    try {
+      subscription = subscribe(receive)
+      // Also support injected adapters that report a failure during registration.
+      if (retired || this.#disposed) { subscription.dispose(); subscription = undefined }
+    } catch { unavailable('appearance-native-failed') }
+  }
+  #startFallback(): () => void {
+    let stopped = false
+    const cleanups: Array<() => void> = []
+    const refresh = () => { if (!this.#disposed && !stopped) this.#publish({ appearance: this.#resolve() }) }
     let debounce: ReturnType<typeof setTimeout> | undefined
     const scheduleRefresh = () => {
-      if (this.#disposed) return
+      if (this.#disposed || stopped) return
       if (debounce) clearTimeout(debounce)
       debounce = setTimeout(() => { debounce = undefined; refresh() }, 30)
       debounce.unref?.()
     }
     let polling = false
     const fallback = () => {
-      if (this.#disposed || polling) return
+      if (this.#disposed || stopped || polling) return
       polling = true
-      this.#publish({ appearanceBackend: 'poll', degradations: ['appearance-monitor-unavailable'] })
+      this.#publish({ appearanceBackend: 'poll', degradations: [...new Set([...this.#snapshot.degradations, 'appearance-monitor-unavailable'])] })
       refresh()
       const timer = setInterval(refresh, this.options.pollIntervalMs ?? 2000)
       timer.unref?.()
-      this.#cleanup.push(() => clearInterval(timer))
+      cleanups.push(() => clearInterval(timer))
     }
     try {
       const child = (this.options.spawnMonitor ?? spawn)('gsettings', ['monitor', 'org.gnome.desktop.interface', 'color-scheme'], { stdio: ['ignore', 'pipe', 'ignore'] })
       child.stdout?.on('data', scheduleRefresh)
       child.on('error', fallback)
       child.on('exit', fallback)
-      this.#cleanup.push(() => {
+      cleanups.push(() => {
         if (debounce) clearTimeout(debounce)
         child.stdout?.off('data', scheduleRefresh)
         child.off('exit', fallback)
@@ -77,6 +133,12 @@ export class LinuxDesktopIntegration {
       })
       if (child.stdout) this.#publish({ appearanceBackend: 'monitor' }); else fallback()
     } catch { fallback() }
+    refresh()
+    return () => {
+      if (stopped) return
+      stopped = true
+      while (cleanups.length) { try { cleanups.pop()!() } catch {} }
+    }
   }
   pickDirectory = async (signal?: AbortSignal): Promise<PortalPickResult> => {
     const operation = new AbortController()

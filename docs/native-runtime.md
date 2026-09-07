@@ -6,7 +6,8 @@ application depends on a small set of GPUIX APIs added by
 `patches/gpuix-0.7.0-heddlework.patch`, which spans two trees:
 
 - the GPUIX repository root (`packages/native`, `packages/react`), and
-- the `crates/gpui` section inside the checked-out Zed submodule.
+- the `crates/gpui`, platform backend, `crates/gpui_linux`, and
+  `crates/gpui_platform` sections inside the checked-out Zed submodule.
 
 `native-runtime.json` is the machine-readable contract between Heddlework and
 that runtime. It records:
@@ -102,3 +103,49 @@ source checkout does not contribute upstream tests to `bun run check`.
 - Test renderer: terminal test fixtures register only when
   `hasTestGpuixRenderer()` is true, which is why the suite reports skips on
   runtimes without it.
+
+## Native Linux appearance
+
+The optional `native.system-appearance` capability exposes
+`subscribeSystemAppearance(listener)`, returning an idempotent disposal handle.
+Initialization is asynchronous. Available events carry raw `none`, `light`, or
+`dark` preferences; transport failure reports `unavailable`, not `none`.
+Non-Linux targets report unsupported availability asynchronously.
+
+The owned Linux Settings task observes changes before reading the initial
+snapshot, reconciles buffered changes, suppresses duplicates, and bounds setup
+to six seconds. Disposal cancels the task; the N-API delivery trampoline also
+fences queued callbacks. This does not change GPUI window-theme policy.
+
+Heddlework uses explicit native preferences without starting gsettings. No
+preference keeps native observation while the existing monitor/poll fallback
+resolves appearance. Failure or setup timeout retires native observation for
+the provider lifetime. Omarchy palettes and explicit theme modes are unchanged.
+
+Native code requires rebuilding and explicitly restarting the app; Bun watch
+does not reload an addon. Check the loaded addon path before dogfooding.
+Run the controlled private-session probe against an explicitly selected addon:
+
+```sh
+dbus-run-session -- bun scripts/probe-system-appearance.ts /path/to/rebuilt-addon.node
+```
+
+The fixture requires `/usr/bin/python3` with PyGObject and `gdbus`. The probe
+covers raw preference mapping, duplicate suppression, disposal during setup and
+stream waiting, queued delivery after disposal, listener self-disposal,
+environment teardown, read/change ordering, malformed signal data, and portal
+owner loss. It passed against `/tmp/heddlework-m3.node`.
+
+Hyprland acceptance also passed with the rebuilt addon installed at
+`node_modules/@gpuix/native/gpuix-native.linux-x64-gnu.node` (SHA-256
+`04b047ab332384fd4f3d664d51aaecda0758bcaa3ef4c2a8fa674b885c5ae7ad`).
+A fresh app launch created a native window, resolved the initial light preference
+through the native backend, received a real light-to-dark settings change with
+no gsettings monitor child, and shut down cleanly on SIGTERM. The original
+preference was restored. The browser-free executable is `dist/heddlework`.
+The complete patch applies to clean pinned GPUIX and Zed source trees.
+
+GNOME and KDE desktop sessions were not exercised; Hyprland and private D-Bus
+results must not be presented as acceptance for those desktops. The locally
+installed addon must be rebuilt/reinstalled after dependency replacement;
+Bun watch alone does not reload it.

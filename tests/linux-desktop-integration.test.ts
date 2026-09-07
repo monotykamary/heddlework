@@ -2,6 +2,90 @@ import { describe, expect, it } from 'bun:test'
 import { LinuxDesktopIntegration } from '../src/linux/desktop-integration.ts'
 import { runDesktopCommand } from '../src/linux/process.ts'
 
+describe('native appearance ownership', () => {
+  it('withdraws polling after none becomes explicit and preserves snapshot identity', async () => {
+    let emit: ((event: import('../src/linux/native-appearance.ts').SystemAppearanceEvent) => void) | undefined
+    let reads = 0
+    let monitors = 0
+    let disposals = 0
+    const service = new LinuxDesktopIntegration({
+      resolveAppearance: () => { reads++; return 'dark' },
+      pollIntervalMs: 5,
+      subscribeNativeAppearance: listener => { emit = listener; return { dispose() { disposals++ } } },
+      spawnMonitor: () => { monitors++; throw new Error('no monitor') },
+    })
+    try {
+      service.start()
+      emit!({ status: 'available', preference: 'none' })
+      expect(service.getSnapshot().appearanceBackend).toBe('poll')
+      const fallback = service.getSnapshot()
+      emit!({ status: 'available', preference: 'none' })
+      expect(service.getSnapshot()).toBe(fallback)
+      expect(monitors).toBe(1)
+      expect(disposals).toBe(0)
+      emit!({ status: 'available', preference: 'light' })
+      const native = service.getSnapshot()
+      const previousReads = reads
+      emit!({ status: 'available', preference: 'light' })
+      expect(service.getSnapshot()).toBe(native)
+      expect(native.appearanceBackend).toBe('native')
+      expect(native.degradations).toEqual([])
+      await Bun.sleep(20)
+      expect(reads).toBe(previousReads)
+      emit!({ status: 'unavailable', reason: 'disconnected' })
+      expect(service.getSnapshot().appearanceBackend).toBe('poll')
+      expect(disposals).toBe(1)
+      emit!({ status: 'available', preference: 'light' })
+      expect(service.getSnapshot().appearanceBackend).toBe('poll')
+    } finally { service.dispose() }
+    expect(disposals).toBe(1)
+  })
+
+  it('retires a timed-out native subscription and ignores late preferences', async () => {
+    let emit: ((event: { status: 'available'; preference: 'light' }) => void) | undefined
+    let disposals = 0
+    const service = new LinuxDesktopIntegration({
+      resolveAppearance: () => 'dark',
+      nativeSetupTimeoutMs: 1,
+      pollIntervalMs: 1000,
+      subscribeNativeAppearance: listener => { emit = listener; return { dispose() { disposals++ } } },
+      spawnMonitor: () => { throw new Error('monitor unavailable') },
+    })
+    try {
+      service.start()
+      await Bun.sleep(20)
+      expect(disposals).toBe(1)
+      expect(service.getSnapshot().appearanceBackend).toBe('poll')
+      emit?.({ status: 'available', preference: 'light' })
+      expect(service.getSnapshot().appearance).toBe('dark')
+    } finally { service.dispose() }
+    expect(disposals).toBe(1)
+  })
+
+  it('uses an explicit native preference without starting a monitor or probing gsettings', () => {
+    let reads = 0
+    let disposed = 0
+    let emit: ((event: { status: 'available'; preference: 'dark' | 'light' | 'none' }) => void) | undefined
+    const service = new LinuxDesktopIntegration({
+      resolveAppearance: () => { reads++; return 'dark' },
+      subscribeNativeAppearance: listener => { emit = listener; return { dispose() { disposed++ } } },
+      spawnMonitor: () => { throw new Error('native preference must not spawn a monitor') },
+    })
+    try {
+      const initial = service.getSnapshot()
+      expect(initial).toMatchObject({ appearance: 'dark', appearanceBackend: 'initializing' })
+      expect(reads).toBe(0)
+      service.start()
+      expect(service.getSnapshot()).toBe(initial)
+      emit?.({ status: 'available', preference: 'light' })
+      expect(service.getSnapshot().appearance).toBe('light')
+      expect(service.getSnapshot().appearanceBackend).toBe('native')
+      expect(reads).toBe(0)
+    } finally { service.dispose() }
+    expect(disposed).toBe(1)
+  })
+})
+
 describe('Linux desktop picker ownership', () => {
   it('stops after cancellation and retries portal on a later operation', async () => {
     let calls = 0

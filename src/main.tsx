@@ -1,4 +1,6 @@
 import { LinuxDesktopIntegration } from './linux/desktop-integration.ts'
+import { nativeAppearanceAdapter, type SubscribeSystemAppearance } from './linux/native-appearance.ts'
+import * as nativeRuntime from '@gpuix/native'
 import { pickWorkspaceDirectory } from './ui/open-external.ts'
 import React from 'react'
 import { render, resetRender } from '@gpuix/react'
@@ -46,7 +48,12 @@ const previous = globalThis.__heddleworkRuntime
 const coldStart = previous === undefined
 if (previous) await previous.dispose()
 
-const desktop = process.platform === 'linux' ? new LinuxDesktopIntegration() : undefined
+const subscribeNativeAppearance = nativeAppearanceAdapter(nativeRuntime as typeof nativeRuntime & {
+  subscribeSystemAppearance?: SubscribeSystemAppearance
+})
+const desktop = process.platform === 'linux' ? new LinuxDesktopIntegration({
+  ...(subscribeNativeAppearance ? { subscribeNativeAppearance } : {}),
+}) : undefined
 const pickDirectory = desktop ? async (signal?: AbortSignal) => {
   const result = await desktop.pickDirectory(signal)
   return result.path ? { path: result.path } : result.error ? { error: result.error } : {}
@@ -99,8 +106,8 @@ const runtime: RuntimeHandle = {
   dispose: async () => {
     if (disposed) return
     disposed = true
-    process.off('SIGINT', shutdown)
-    process.off('SIGTERM', shutdown)
+    process.off('SIGINT', handleSignal)
+    process.off('SIGTERM', handleSignal)
     process.off('uncaughtException', handleUncaughtException)
     process.off('unhandledRejection', handleUnhandledRejection)
     themeManager.dispose()
@@ -148,8 +155,9 @@ function shutdown(initialError?: unknown): void {
 
 process.prependListener('uncaughtException', handleUncaughtException)
 process.prependListener('unhandledRejection', handleUnhandledRejection)
-process.once('SIGINT', shutdown)
-process.once('SIGTERM', shutdown)
+function handleSignal(): void { shutdown() }
+process.once('SIGINT', handleSignal)
+process.once('SIGTERM', handleSignal)
 
 // Report the native runtime contract before rendering; an incompatible runtime
 // must be named here instead of failing later during layout or paint. Packaged
