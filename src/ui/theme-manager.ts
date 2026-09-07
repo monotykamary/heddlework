@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { applyResolvedTheme, type ResolvedTheme } from './theme.ts'
@@ -8,6 +8,7 @@ import { readOmarchyPalette, type OmarchyThemeCandidate, type OmarchySourceState
 export type ThemeMode = 'system' | ResolvedTheme
 export interface ThemeSnapshot { mode: ThemeMode; resolved: ResolvedTheme; palette: ThemePaletteStatus }
 export interface ThemeManagerOptions {
+  appearanceSource?: { getSnapshot(): { appearance: ResolvedTheme }; subscribe(listener: () => void): () => void }
   preferencePath?: string | false
   resolveSystemTheme?: () => ResolvedTheme
   pollIntervalMs?: number
@@ -16,12 +17,6 @@ export interface ThemeManagerOptions {
   debounceMs?: number
 }
 type Cleanup = () => void
-interface ThemeMonitorProcess {
-  kill(signal?: string): void
-  stdout?: { on(event: 'data', cb: () => void): void; off?(event: 'data', cb: () => void): void }
-  on?(event: 'error' | 'exit', listener: () => void): unknown
-  off?(event: 'error' | 'exit', listener: () => void): unknown
-}
 interface ThemeFileWatcher {
   close(): void
   on(event: 'error', listener: () => void): unknown
@@ -29,7 +24,6 @@ interface ThemeFileWatcher {
 }
 interface ThemeMonitorHooks {
   platform?: NodeJS.Platform
-  spawnProcess?: (command: string, args: string[]) => ThemeMonitorProcess | undefined
   watcher?: (path: string, onChange: () => void) => { dispose(): void } | undefined
   watchFile?: (path: string, onChange: () => void) => ThemeFileWatcher
   readFile?: (path: string) => string | undefined
@@ -52,7 +46,7 @@ export class ThemeManager {
 
   constructor(private readonly options: ThemeManagerOptions = {}, private readonly hooks: ThemeMonitorHooks = {}) {
     this.#preferencePath = options.preferencePath === undefined ? themePreferencePath() : options.preferencePath
-    this.#resolveSystemTheme = options.resolveSystemTheme ?? detectSystemTheme
+    this.#resolveSystemTheme = options.appearanceSource ? () => options.appearanceSource!.getSnapshot().appearance : options.resolveSystemTheme ?? detectSystemTheme
     this.#candidates = options.omarchyCandidates ?? []
     const mode = readThemeMode(this.#preferencePath) ?? 'system'
     this.#source = readOmarchyPalette(this.#candidates, undefined, hooks.readFile)
@@ -104,35 +98,14 @@ export class ThemeManager {
       this.#timer = setInterval(() => {
         if (!alive()) return
         this.#reconcileWatches(schedule)
-        if (!this.#pending) this.#refresh(this.#snapshot.mode, systemAttached ? this.#snapshot.resolved : undefined)
+        if (!this.#pending) this.#refresh(this.#snapshot.mode, this.options.appearanceSource ? this.options.appearanceSource.getSnapshot().appearance : undefined)
       }, this.options.pollIntervalMs ?? 2_000)
       this.#timer.unref?.()
     }
-    let systemAttached = false
-    if (this.options.enableEventSource && (this.hooks.platform ?? process.platform) === 'linux') {
-      const available = this.hooks.spawnProcess || (process.env.PATH ?? '').split(':').some(dir => dir && existsSync(join(dir, 'gsettings')))
-      if (available) {
-        try {
-          const child = (this.hooks.spawnProcess ?? spawn)('gsettings', ['monitor', 'org.gnome.desktop.interface', 'color-scheme']) as ThemeMonitorProcess | undefined
-          if (child) {
-            const fallback = () => { if (alive()) { systemAttached = false; this.refreshSystemTheme(); poll() } }
-            child.stdout?.on('data', schedule)
-            child.on?.('error', fallback)
-            child.on?.('exit', fallback)
-            this.#cleanups.push(() => {
-              child.stdout?.off?.('data', schedule)
-              child.off?.('exit', fallback)
-              child.off?.('error', fallback)
-              child.kill('SIGTERM')
-            })
-            systemAttached = !!child.stdout
-          }
-        } catch { /* Poll when spawning the monitor fails. */ }
-      }
-    }
+    if (this.options.appearanceSource) this.#cleanups.push(this.options.appearanceSource.subscribe(() => { if (alive()) this.refreshSystemTheme() }))
     this.#reconcileWatches(schedule)
     // Reconcile even with healthy watchers: directory replacement can silently invalidate them.
-    if (!systemAttached || this.#candidates.length) poll()
+    if (!this.options.appearanceSource || this.#candidates.length) poll()
     this.refreshSystemTheme()
   }
   #reconcileWatches(schedule: () => void): void {

@@ -1,3 +1,4 @@
+import { pickWorkspaceDirectory } from './open-external.ts'
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useGpuixRequired, useWindowInsets, useWindowSize } from '@gpuix/react'
 import type { WorkbenchController } from '../workbench/controller.ts'
@@ -47,6 +48,7 @@ export function WorkbenchApp({
   terminals,
   browsers,
   themeManager = defaultThemeManager,
+  pickDirectory = pickWorkspaceDirectory,
   onQuit,
 }: {
   controller: WorkbenchController
@@ -56,6 +58,7 @@ export function WorkbenchApp({
   terminals?: TerminalSessionService
   browsers?: BrowserSessionService
   themeManager?: ThemeManager
+  pickDirectory?: typeof pickWorkspaceDirectory
   onQuit?(): void
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
@@ -304,6 +307,7 @@ export function WorkbenchApp({
     >
       <div style={{ position: 'absolute', top: 0, bottom: 0, right: 0, width: layout.sidebarWidth }}>
         <WorkbenchSidebar
+          pickDirectory={pickDirectory}
           width={layout.sidebarWidth}
           state={state}
           controller={controller}
@@ -353,7 +357,7 @@ export function WorkbenchApp({
                 </MotionDiv>
                 <MotionDiv initial={false} animate={{ flexGrow: conversationBodyFlexGrow }} transition={LAYOUT_MOTION_TRANSITION} testId="conversation-body" style={{ position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: conversationBodyFlexGrow, minHeight: 0, overflow: 'hidden' }}>
                   {draft ? (
-                    <DraftWorkspaceChooser state={state} controller={controller} />
+                    <DraftWorkspaceChooser pickDirectory={pickDirectory} state={state} controller={controller} />
                   ) : (
                     <>
                       <Transcript state={state} presenters={presenters} appearance={theme.resolved} interactionDisabled={composerPickerOpen} onOpenDiff={() => openDiff()} onRevert={(entryId) => void controller.navigateTree(entryId)} onDismissNotice={(id) => controller.dismissNotice(id)} onLoadEarlier={controller.loadEarlierMessages} />

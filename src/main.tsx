@@ -1,3 +1,5 @@
+import { LinuxDesktopIntegration } from './linux/desktop-integration.ts'
+import { pickWorkspaceDirectory } from './ui/open-external.ts'
 import React from 'react'
 import { render, resetRender } from '@gpuix/react'
 import { existsSync } from 'node:fs'
@@ -44,7 +46,13 @@ const previous = globalThis.__heddleworkRuntime
 const coldStart = previous === undefined
 if (previous) await previous.dispose()
 
+const desktop = process.platform === 'linux' ? new LinuxDesktopIntegration() : undefined
+const pickDirectory = desktop ? async (signal?: AbortSignal) => {
+  const result = await desktop.pickDirectory(signal)
+  return result.path ? { path: result.path } : result.error ? { error: result.error } : {}
+} : pickWorkspaceDirectory
 const themeManager = new ThemeManager({
+  ...(desktop ? { appearanceSource: desktop } : {}),
   // On Linux, follow desktop portal/theme events and, when an Omarchy palette
   // is present, overlay it onto the resolved theme. Both are opt-in and degrade
   // to the built-in palette (and polling) elsewhere.
@@ -96,6 +104,7 @@ const runtime: RuntimeHandle = {
     process.off('uncaughtException', handleUncaughtException)
     process.off('unhandledRejection', handleUnhandledRejection)
     themeManager.dispose()
+    desktop?.dispose()
     await kernel.dispose()
   },
 }
@@ -161,7 +170,7 @@ try {
 }
 
 render(
-  <WorkbenchApp controller={controller} flows={flows} terminals={terminals} browsers={browsers} presenters={kernel.contributions(toolPresenterSlot)} ui={ui} themeManager={themeManager} onQuit={shutdown} />,
+  <WorkbenchApp controller={controller} flows={flows} terminals={terminals} browsers={browsers} presenters={kernel.contributions(toolPresenterSlot)} ui={ui} themeManager={themeManager} pickDirectory={pickDirectory} onQuit={shutdown} />,
   {
     ...createWindowOptions(
       process.platform,
@@ -174,6 +183,7 @@ render(
   },
 )
 
+desktop?.start()
 themeManager.start()
 void controller.start()
 if (browserSmokeUrl) startPackagedBrowserSmoke(browsers, browserSmokeUrl)

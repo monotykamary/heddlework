@@ -1,7 +1,16 @@
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { requestPortalDirectory } from './portal-file-chooser.ts'
+import type { PortalPickResult } from './portal-file-chooser.ts'
+import { runDesktopCommand } from '../linux/process.ts'
+
+export async function runDirectoryPicker(picker: DirectoryPickerCommand, signal?: AbortSignal): Promise<PortalPickResult> {
+  const result = await runDesktopCommand(picker.command, picker.args, { signal })
+  if (!result) return { status: 'unavailable' }
+  if (result.code === 1 && (picker.command === 'zenity' || picker.command === 'kdialog')) return { status: 'cancelled' }
+  if (result.code !== 0) return { status: 'unavailable' }
+  return result.stdout.trim() ? { status: 'selected', path: resolve(result.stdout.trim()) } : { status: 'cancelled' }
+}
 
 export interface DirectoryPickerCommand {
   command: string
@@ -27,7 +36,7 @@ export function directoryPickerCommand(platform: NodeJS.Platform = process.platf
   if (platform === 'darwin') {
     return {
       command: '/usr/bin/osascript',
-      args: ['-e', 'POSIX path of (choose folder with prompt "Open project in Heddlework")'],
+      args: ['-e', 'try\nPOSIX path of (choose folder with prompt "Open project in Heddlework")\non error message number code\nif code is -128 then\nreturn ""\nelse\nerror message number code\nend if\nend try'],
     }
   }
   if (platform === 'win32') {
@@ -35,7 +44,7 @@ export function directoryPickerCommand(platform: NodeJS.Platform = process.platf
       'Add-Type -AssemblyName System.Windows.Forms',
       '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
       '$dialog.Description = "Open project in Heddlework"',
-      'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath } else { exit 1 }',
+      'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath } else { exit 0 }',
     ].join('; ')
     return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', script] }
   }
@@ -60,29 +69,13 @@ export function directoryPickerCommands(platform: NodeJS.Platform = process.plat
   return [primary, ...fallbacks]
 }
 
-export async function pickWorkspaceDirectory(): Promise<WorkspaceDirectoryPick> {
-  if (process.platform === 'linux') {
-    const portal = await requestPortalDirectory()
-    if (portal.status === 'cancelled' || portal.status === 'selected') {
-      // A portal dismissal is a deliberate cancel and never pops a second
-      // fallback dialog; only an unavailable warn degrades onward.
-      return portal.path ? { path: portal.path } : {}
-    }
-    // Portal was unavailable or unresponsive; degrade through zenity/kdialog.
+export async function pickWorkspaceDirectory(signal?: AbortSignal): Promise<WorkspaceDirectoryPick> {
+  if (process.platform === 'linux') return { error: 'Linux desktop integration is not configured' }
+  for (const picker of directoryPickerCommands()) {
+    const result = await runDirectoryPicker(picker, signal)
+    if (result.status !== 'unavailable') return result.path ? { path: result.path } : {}
   }
-  const pickers = directoryPickerCommands()
-  if (pickers.length === 0) return { error: 'No folder picker is available on this system' }
-  const failures: string[] = []
-  for (const picker of pickers) {
-    const selected = await captureProcessOutput(picker.command, picker.args)
-    if (selected !== undefined) {
-      // Empty (but clean) output means the user dismissed the dialog; treat it
-      // as an intentional cancel rather than cascading to the next picker.
-      return selected.trim() ? { path: resolve(selected.trim()) } : {}
-    }
-    failures.push(picker.command)
-  }
-  return { error: 'Could not open a folder picker (' + failures.join(', ') + ' unavailable)' }
+  return { error: 'No folder picker is available on this system' }
 }
 
 export function systemTargetCommand(target: string, platform: NodeJS.Platform = process.platform): DirectoryPickerCommand {
@@ -100,26 +93,4 @@ function openSystemTarget(target: string): void {
   } catch {
     // External launch failures are non-fatal and leave the current surface open.
   }
-}
-
-function captureProcessOutput(command: string, args: string[]): Promise<string | undefined> {
-  return new Promise((resolveOutput) => {
-    let settled = false
-    const finish = (value?: string) => {
-      if (settled) return
-      settled = true
-      resolveOutput(value)
-    }
-    let child
-    try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
-    } catch {
-      finish()
-      return
-    }
-    const chunks: Buffer[] = []
-    child.stdout.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)))
-    child.on('error', () => finish())
-    child.on('close', (code) => finish(code === 0 ? Buffer.concat(chunks).toString('utf8') : undefined))
-  })
 }

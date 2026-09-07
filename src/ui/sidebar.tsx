@@ -1,3 +1,4 @@
+import { useDirectoryPicker } from './use-directory-picker.ts'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, useGpuixRequired, type SelectItemState, type SelectTriggerState } from '@gpuix/react'
 import { resolve } from 'node:path'
@@ -18,6 +19,7 @@ const ALL_PROJECTS_SCOPE = '__all-projects__'
 
 export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
   width = SIDEBAR_WIDTH,
+  pickDirectory = pickWorkspaceDirectory,
   state,
   controller,
   flowsAvailable = false,
@@ -31,6 +33,7 @@ export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
   onSettings,
   onNotifications,
 }: {
+  pickDirectory?: typeof pickWorkspaceDirectory
   width?: number
   state: WorkbenchState
   controller: WorkbenchController
@@ -48,7 +51,7 @@ export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
   const renderer = useGpuixRequired()
   const [search, setSearch] = useState('')
   const [projectScope, setProjectScope] = useState(ALL_PROJECTS_SCOPE)
-  const [pickingProject, setPickingProject] = useState(false)
+  const { picking: pickingProject, pick } = useDirectoryPicker(pickDirectory, controller)
   const [snoozeMenu, setSnoozeMenu] = useState<string | null>(null)
   const [settledExpanded, setSettledExpanded] = useState(false)
   const [clock, setClock] = useState(Date.now())
@@ -194,11 +197,7 @@ export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
             label={pickingProject ? 'Choosing project…' : 'New project'}
             disabled={pickingProject}
             onClick={() => {
-              setPickingProject(true)
-              void pickWorkspaceDirectory().then((pick) => {
-                if (pick.error) controller.notify('error', pick.error)
-                else if (pick.path) void controller.switchWorkspace(pick.path)
-              }).finally(() => setPickingProject(false))
+              void pick()
             }}
           />
         </div>
@@ -236,6 +235,7 @@ export const WorkbenchSidebar = React.memo(function WorkbenchSidebar({
     </div>
   )
 }, (previous, next) => previous.controller === next.controller
+  && previous.pickDirectory === next.pickDirectory
   && previous.width === next.width
   && previous.flowsAvailable === next.flowsAvailable
   && previous.flowsActive === next.flowsActive

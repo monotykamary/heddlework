@@ -1,3 +1,4 @@
+import { LinuxDesktopIntegration } from '../src/linux/desktop-integration.ts'
 import { omarchyThemeCandidates, parseOmarchyPalette } from '../src/ui/omarchy-theme-source.ts'
 import { afterEach, describe, expect, it } from 'bun:test'
 import { EventEmitter } from 'node:events'
@@ -72,6 +73,7 @@ function makeFakeMonitor() {
   const process = {
     stdout,
     on: events.on.bind(events),
+    once: events.once.bind(events),
     off: events.off.bind(events),
     kill: (signal = 'SIGTERM') => { killSignals.push(signal) },
   }
@@ -84,11 +86,13 @@ describe('ThemeManager event source lifecycle', () => {
     let calls = 0
     let appearance: 'dark' | 'light' = 'dark'
     let content = 'background = "#123456"'
+    const desktop = new LinuxDesktopIntegration({ resolveAppearance: () => { calls++; return appearance }, spawnMonitor: (() => monitor.process) as never, pollIntervalMs: 2 })
+    desktop.start()
     const manager = new ThemeManager({
-      preferencePath: false, resolveSystemTheme: () => { calls++; return appearance },
+      preferencePath: false, appearanceSource: desktop,
       omarchyCandidates: omarchyThemeCandidates('linux', {}, '/fixture'),
       enableEventSource: true, pollIntervalMs: 2, debounceMs: 1,
-    }, { platform: 'linux', spawnProcess: () => monitor.process, watcher: () => undefined, readFile: () => content })
+    }, { platform: 'linux', watcher: () => undefined, readFile: () => content })
     manager.start()
     try {
       const initialCalls = calls
@@ -98,7 +102,10 @@ describe('ThemeManager event source lifecycle', () => {
       expect(calls).toBe(initialCalls)
       appearance = 'light'
       monitor.process.stdout.emit('data')
-      await Bun.sleep(10)
+      monitor.process.stdout.emit('data')
+      expect(calls).toBe(initialCalls)
+      await Bun.sleep(60)
+      expect(calls).toBe(initialCalls + 1)
       expect(manager.getSnapshot().resolved).toBe('light')
       expect(calls).toBeGreaterThan(initialCalls)
       monitor.events.emit('exit', 1)
@@ -107,7 +114,7 @@ describe('ThemeManager event source lifecycle', () => {
       await Bun.sleep(10)
       expect(calls).toBeGreaterThan(exitCalls)
       expect(manager.getSnapshot().resolved).toBe('dark')
-    } finally { manager.dispose() }
+    } finally { manager.dispose(); desktop.dispose() }
   })
   it('runs polling under an injected resolver and releases on dispose', () => {
     // With no event sources, start() falls back to a polling timer that the
@@ -127,7 +134,10 @@ describe('ThemeManager event source lifecycle', () => {
   it('falls back to polling when the system monitor errors and terminates it on disposal', async () => {
     let systemTheme: 'light' | 'dark' = 'dark'
     const monitor = makeFakeMonitor()
+    const desktop = new LinuxDesktopIntegration({ resolveAppearance: () => systemTheme, spawnMonitor: (() => monitor.process) as never, pollIntervalMs: 1 })
+    desktop.start()
     const manager = new ThemeManager({
+      appearanceSource: desktop,
       preferencePath: false,
       resolveSystemTheme: () => systemTheme,
       pollIntervalMs: 1,
@@ -135,8 +145,7 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => monitor.process,
-    })
+      })
 
     manager.start()
     try {
@@ -146,6 +155,7 @@ describe('ThemeManager event source lifecycle', () => {
       expect(manager.getSnapshot().resolved).toBe('light')
     } finally {
       manager.dispose()
+      desktop.dispose()
     }
     expect(monitor.killSignals).toEqual(['SIGTERM'])
   })
@@ -153,7 +163,10 @@ describe('ThemeManager event source lifecycle', () => {
   it('falls back to polling when the system monitor exits early', async () => {
     let systemTheme: 'light' | 'dark' = 'dark'
     const monitor = makeFakeMonitor()
+    const desktop = new LinuxDesktopIntegration({ resolveAppearance: () => systemTheme, spawnMonitor: (() => monitor.process) as never, pollIntervalMs: 1 })
+    desktop.start()
     const manager = new ThemeManager({
+      appearanceSource: desktop,
       preferencePath: false,
       resolveSystemTheme: () => systemTheme,
       pollIntervalMs: 1,
@@ -161,8 +174,7 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => monitor.process,
-    })
+      })
 
     manager.start()
     try {
@@ -172,6 +184,7 @@ describe('ThemeManager event source lifecycle', () => {
       expect(manager.getSnapshot().resolved).toBe('light')
     } finally {
       manager.dispose()
+      desktop.dispose()
     }
   })
 
@@ -185,7 +198,6 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => undefined,
       watcher: (_path, listener) => {
         onChange = listener
         return { dispose() {} }
@@ -218,7 +230,6 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => monitor.process,
       watcher: () => undefined,
       readFile: () => content,
     })
@@ -246,7 +257,6 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => monitor.process,
       watchFile: () => ({
         on: watcherEvents.on.bind(watcherEvents),
         off: watcherEvents.off.bind(watcherEvents),
@@ -276,7 +286,6 @@ describe('ThemeManager event source lifecycle', () => {
       enableEventSource: true,
     }, {
       platform: 'linux',
-      spawnProcess: () => undefined,           // force fs watcher path
       watcher: () => watcher as { dispose(): void },
     })
     manager.start()
@@ -294,7 +303,7 @@ describe('source transitions', () => {
     const home = mkdtempSync(join(tmpdir(), 'heddlework-omarchy-'))
     const candidates = omarchyThemeCandidates('linux', {}, home)
     const path = candidates[0]!.path
-    const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: candidates, enableEventSource: true, pollIntervalMs: 20, debounceMs: 2 }, { platform: 'linux', spawnProcess: () => undefined })
+    const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: candidates, enableEventSource: true, pollIntervalMs: 20, debounceMs: 2 }, { platform: 'linux', })
     const until = async (predicate: () => boolean) => {
       const deadline = Date.now() + 2_000
       while (!predicate() && Date.now() < deadline) await Bun.sleep(5)
@@ -367,7 +376,7 @@ describe('source transitions', () => {
     let content = 'background = "#123456"'
     const callbacks: Array<() => void> = []
     const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: omarchyThemeCandidates('linux', {}, '/fixture'), enableEventSource: true, debounceMs: 1 }, {
-      platform: 'linux', spawnProcess: () => undefined, readFile: () => content,
+      platform: 'linux', readFile: () => content,
       watcher: (_path, callback) => { callbacks.push(callback); return { dispose() {} } },
     })
     manager.start()

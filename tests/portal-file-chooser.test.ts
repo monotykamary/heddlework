@@ -39,6 +39,18 @@ describe('portal response framing', () => {
 })
 
 describe('requestPortalDirectory', () => {
+  it('rejects a pre-aborted request without starting any transport', async () => {
+    const abort = new AbortController()
+    abort.abort()
+    const commands: string[] = []
+    const probe: PortalPickerProbe = {
+      run: async (command) => { commands.push(command); return undefined },
+      monitor: async (command) => { commands.push(command); return undefined },
+    }
+    await expect(requestPortalDirectory(probe, abort.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(commands).toEqual([])
+  })
+
   it('returns a resolved path for a successful selection', async () => {
     const result = await requestPortalDirectory(portalProbe("uint32 0\n  string 'file:///home/user/project'"))
     expect(result.status).toBe('selected')

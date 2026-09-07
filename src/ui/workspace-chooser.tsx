@@ -1,3 +1,4 @@
+import { useDirectoryPicker } from './use-directory-picker.ts'
 import React, { useMemo, useState } from 'react'
 import { basename, resolve } from 'node:path'
 import type { WorkbenchController } from '../workbench/controller.ts'
@@ -29,10 +30,10 @@ export function workspaceChoices(state: Pick<WorkbenchState, 'workspacePath' | '
   })
 }
 
-export function DraftWorkspaceChooser({ state, controller }: { state: WorkbenchState; controller: WorkbenchController }) {
+export function DraftWorkspaceChooser({ state, controller, pickDirectory = pickWorkspaceDirectory }: { state: WorkbenchState; controller: WorkbenchController; pickDirectory?: typeof pickWorkspaceDirectory }) {
   const layout = useResponsiveLayout()
   const dropdown = useDropdownState()
-  const [picking, setPicking] = useState(false)
+  const { picking, pick } = useDirectoryPicker(pickDirectory, controller)
   const [query, setQuery] = useState('')
   const choices = useMemo(() => workspaceChoices(state), [state.sessions, state.workspacePath])
   const current = choices[0]!
@@ -46,15 +47,7 @@ export function DraftWorkspaceChooser({ state, controller }: { state: WorkbenchS
     setQuery('')
   }
   const chooseNewProject = () => {
-    if (picking) return
-    setPicking(true)
-    void pickWorkspaceDirectory().then((pick) => {
-      if (pick.error) controller.notify('error', pick.error)
-      else if (pick.path) void controller.switchWorkspace(pick.path)
-    }).finally(() => {
-      setPicking(false)
-      closeMenu()
-    })
+    void pick(closeMenu)
   }
   return (
     <div testId="draft-workspace" style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', flexGrow: 1, minHeight: 0, width: '100%', paddingLeft: layout.contentGutter, paddingRight: layout.contentGutter, paddingBottom: layout.mobile ? 42 : 74, ...(layout.mobile ? { overflow: 'scroll' } : {}) }}>

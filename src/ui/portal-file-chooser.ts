@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { abortable, runDesktopCommand, throwIfAborted } from '../linux/process.ts'
 import { resolve } from 'node:path'
 
 export type PortalPickStatus = 'selected' | 'cancelled' | 'unavailable'
@@ -12,7 +12,7 @@ export interface PortalPickResult {
 
 export interface PortalPickerProbe {
   // Runs a bounded query and returns its output (undefined on timeout/failure).
-  run?(command: string, args: string[], timeoutMs: number): Promise<string | undefined>
+  run?(command: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string | undefined>
   // Listens for a portal Response signal. A listener that starts before the
   // OpenFile call is armed is passed the handle_token so it can discriminate
   // this request (the portal echoes the token in the request object path).
@@ -46,53 +46,58 @@ function quoteVariant(value: string): string {
 // We generate a unique handle_token, subscribe to Request Response signals
 // keyed by that token, then call OpenFile with the same token, which the
 // portal echoes back in the request object path.
-export async function requestPortalDirectory(
-  probe: PortalPickerProbe = {},
-): Promise<PortalPickResult> {
+export async function requestPortalDirectory(probe: PortalPickerProbe = {}, signal?: AbortSignal): Promise<PortalPickResult> {
+  throwIfAborted(signal)
   const run = probe.run ?? runCommand
-  const monitor = probe.monitor ?? probe.run ?? runPortalMonitor
+  const monitor: NonNullable<PortalPickerProbe['monitor']> = probe.monitor ?? (probe.run
+    ? (command, args, timeoutMs, _token, signal) => probe.run!(command, args, timeoutMs, signal)
+    : runPortalMonitor)
   const parseHandle = probe.parseHandle ?? extractOpenFilePath
   const parseCode = probe.parseCode ?? extractResponseCode
   const parseUris = probe.parseUris ?? extractUris
-
   const token = 'heddlework_' + randomBytes(9).toString('hex')
-  const monitorArg = "type='signal',interface='org.freedesktop.portal.Request',member='Response'"
-  // Listen BEFORE opening the portal so the response cannot arrive unseen.
-  const monitorAbort = new AbortController()
-  const signalPromise = monitor('dbus-monitor', ['--session', monitorArg], SESSION_TIMEOUT_MS, token, monitorAbort.signal)
-
-  const openArgs = [
-    'call', '--session',
-    '--dest', PORTAL_BUS,
-    '--object-path', PORTAL_OBJECT,
-    '--method', PORTAL_METHOD,
-    "''",
-    TITLE,
-    '{' + quoteVariant('directory') + ': <true>, ' + quoteVariant('modal') + ': <true>, ' + quoteVariant('handle_token') + ': ' + quoteVariant(token) + '}',
-  ]
-  const handleOutput = await run('gdbus', openArgs, IPC_TIMEOUT_MS)
-  if (handleOutput === undefined) {
-    monitorAbort.abort()
-    return { status: 'unavailable', error: 'File dialog portal is not reachable' }
+  const operation = new AbortController()
+  const abort = () => operation.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  let handle: string | undefined
+  let completed = false
+  try {
+    throwIfAborted(signal)
+    const signalPromise = Promise.resolve().then(() => monitor('dbus-monitor', ['--session', "type='signal',interface='org.freedesktop.portal.Request',member='Response'"], SESSION_TIMEOUT_MS, token, operation.signal))
+    // Observe early monitor rejection even while the setup call is still pending.
+    void signalPromise.catch(() => {})
+    await Promise.resolve()
+    const openArgs = [
+      'call', '--session', '--dest', PORTAL_BUS, '--object-path', PORTAL_OBJECT,
+      '--method', PORTAL_METHOD, "''", TITLE,
+      '{' + quoteVariant('directory') + ': <true>, ' + quoteVariant('modal') + ': <true>, ' + quoteVariant('handle_token') + ': ' + quoteVariant(token) + '}',
+    ]
+    const handleOutput = await abortable(run('gdbus', openArgs, IPC_TIMEOUT_MS, operation.signal), signal)
+    if (handleOutput === undefined) return { status: 'unavailable', error: 'File dialog portal is not reachable' }
+    handle = parseHandle(handleOutput)
+    if (!handle || !handle.endsWith('/' + token)) {
+      handle = undefined
+      return { status: 'unavailable', error: 'File dialog portal did not open' }
+    }
+    const output = await abortable(signalPromise, signal)
+    throwIfAborted(signal)
+    if (output === undefined) return { status: 'unavailable', error: 'File dialog portal timed out' }
+    const code = parseCode(output)
+    if (code === undefined) return { status: 'unavailable', error: 'File dialog portal returned an unknown response' }
+    completed = true
+    if (code === 1) return { status: 'cancelled' }
+    if (code !== 0) return { status: 'unavailable', error: 'File dialog portal failed' }
+    const uri = parseUris(output)[0]
+    if (!uri) return { status: 'unavailable', error: 'File dialog portal returned no selection' }
+    return { status: 'selected', path: resolve(toFilePath(uri)) }
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    operation.abort()
+    if (handle && !completed) {
+      // Closing the server-side dialog is best effort and bounded independently of caller abort.
+      void Promise.resolve().then(() => run('gdbus', ['call', '--session', '--dest', PORTAL_BUS, '--object-path', handle!, '--method', 'org.freedesktop.portal.Request.Close'], IPC_TIMEOUT_MS)).catch(() => {})
+    }
   }
-  // Validate that the opened request carries our token: a response to a
-  // different request must not be mistaken for ours.
-  const handle = parseHandle(handleOutput)
-  if (!handle || !handle.endsWith('/' + token)) {
-    monitorAbort.abort()
-    return { status: 'unavailable', error: 'File dialog portal did not open' }
-  }
-
-  const signalOutput = await signalPromise
-  if (signalOutput === undefined) return { status: 'unavailable', error: 'File dialog portal timed out' }
-
-  const code = parseCode(signalOutput)
-  if (code === undefined) return { status: 'unavailable', error: 'File dialog portal returned an unknown response' }
-  if (code === 1) return { status: 'cancelled' }
-
-  const uri = parseUris(signalOutput)[0]
-  if (!uri) return { status: 'unavailable', error: 'File dialog portal returned no selection' }
-  return { status: 'selected', path: resolve(toFilePath(uri)) }
 }
 
 export function extractPortalResponseSignal(output: string, token: string): string | undefined {
@@ -114,95 +119,14 @@ export function extractPortalResponseSignal(output: string, token: string): stri
   return undefined
 }
 
-// Runs a single-shot command, resolving as soon as full output closes. For
-// long-lived streams (dbus-monitor) a streaming variant is used instead.
-function runCommand(command: string, args: string[], timeoutMs: number): Promise<string | undefined> {
-  return new Promise((finish) => {
-    let settled = false
-    const done = (value?: string) => {
-      if (settled) return
-      settled = true
-      finish(value)
-    }
-    let child: ReturnType<typeof spawn> | undefined
-    try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch {
-      done(undefined)
-      return
-    }
-    const stdout = child.stdout
-    const stderr = child.stderr
-    if (!stdout || !stderr) {
-      done(undefined)
-      return
-    }
-    const chunks: Buffer[] = []
-    const errors: Buffer[] = []
-    stdout.on('data', (c: Buffer | string) => chunks.push(Buffer.from(c)))
-    stderr.on('data', (c: Buffer | string) => errors.push(Buffer.from(c)))
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM')
-      done()
-    }, timeoutMs)
-    child.on('error', () => {
-      clearTimeout(timer)
-      done()
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const output = code === 0 ? Buffer.concat(chunks).toString('utf8') : Buffer.concat(errors).toString('utf8')
-      done(output && output.trim() ? output : undefined)
-    })
-  })
+async function runCommand(command: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string | undefined> {
+  const result = await runDesktopCommand(command, args, { timeoutMs, signal })
+  return result?.code === 0 && result.stdout.trim() ? result.stdout : undefined
 }
 
-// dbus-monitor is a long-lived stream: it never exits on its own, so we read
-// stdout incrementally and resolve as soon as a Response signal whose request
-// path carries our handle token has been captured, then terminate the child.
-// This bounds the dialog wait instead of stalling to the full timeout.
-function runPortalMonitor(command: string, args: string[], timeoutMs: number, token: string, signal: AbortSignal): Promise<string | undefined> {
-  return new Promise((finish) => {
-    let settled = false
-    let child: ReturnType<typeof spawn> | undefined
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const done = (output?: string) => {
-      if (settled) return
-      settled = true
-      if (timer) clearTimeout(timer)
-      signal.removeEventListener('abort', abort)
-      try { child?.kill('SIGTERM') } catch { }
-      finish(output)
-    }
-    const abort = () => done()
-    signal.addEventListener('abort', abort, { once: true })
-    if (signal.aborted) {
-      done()
-      return
-    }
-    try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch {
-      finish(undefined)
-      return
-    }
-    const stdout = child.stdout
-    const stderr = child.stderr
-    if (!stdout || !stderr) {
-      finish(undefined)
-      return
-    }
-    let output = ''
-    timer = setTimeout(() => done(), timeoutMs)
-    stdout.on('data', (chunk: Buffer | string) => {
-      output += Buffer.from(chunk).toString('utf8')
-      const response = extractPortalResponseSignal(output, token)
-      if (response !== undefined) done(response)
-    })
-    stderr.on('data', () => {})
-    child.on('error', () => done(undefined))
-    child.on('close', () => done(extractPortalResponseSignal(output, token)))
-  })
+async function runPortalMonitor(command: string, args: string[], timeoutMs: number, token: string, signal: AbortSignal): Promise<string | undefined> {
+  const result = await runDesktopCommand(command, args, { timeoutMs, signal, onOutput: output => extractPortalResponseSignal(output, token) })
+  return result?.code === 0 ? extractPortalResponseSignal(result.stdout, token) : undefined
 }
 
 function extractOpenFilePath(stdout: string): string | undefined {
