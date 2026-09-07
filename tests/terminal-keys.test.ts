@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste } from '../src/terminal/keys.ts'
+import { dispatchTerminalKey, encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste, type TerminalKeyEffects, type TerminalKeyEvent } from '../src/terminal/keys.ts'
 
 const ESC = String.fromCharCode(27)
 
@@ -60,5 +60,59 @@ describe('resolveTerminalCommand', () => {
   it('plain lowercase c is not a terminal command', () => {
     expect(resolveTerminalCommand({ key: 'c' }, 'linux')).toBe('none')
     expect(resolveTerminalCommand({ key: 'x' }, 'linux')).toBe('none')
+  })
+})
+
+describe('dispatchTerminalKey (shared production seam) - always run', () => {
+  // Exercises the SAME function TerminalView.onKeyDown calls, with injected
+  // clipboard/PTY sinks, so acceptance is not hostage to a native GPUI renderer.
+  function run(event: TerminalKeyEvent) {
+    const writes: string[] = []
+    const copies: string[] = []
+    const effects: TerminalKeyEffects = {
+      platform: 'linux',
+      grid: {
+        viewport: [{ text: 'alpha' }, { text: 'beta' }],
+        bracketedPaste: false,
+        applicationCursor: false,
+      },
+      write: (data: string) => writes.push(data),
+      copy: (text: string) => { copies.push(text); const p = Promise.reject(new Error('clipboard unavailable')); p.catch(() => {}); return p },
+      readPaste: () => Promise.resolve('pasted'),
+    }
+    dispatchTerminalKey(event, effects)
+    return { writes, copies }
+  }
+
+  it('Ctrl+Shift+C copies and writes zero PTY bytes, even when clipboard fails', async () => {
+    const { writes, copies } = run({ key: 'c', modifiers: { ctrl: true, shift: true } })
+    await Bun.sleep(1)
+    expect(copies).toEqual(['alpha\nbeta'])
+    expect(writes).toEqual([])
+  })
+
+  it('plain Ctrl+C writes exactly one ETX and never copies', () => {
+    const { writes, copies } = run({ key: 'c', modifiers: { ctrl: true } })
+    expect(writes).toEqual([String.fromCharCode(3)])
+    expect(copies).toEqual([])
+  })
+
+  it('ordinary keys fall through to encoding unchanged', () => {
+    const { writes } = run({ key: 'x' })
+    expect(writes).toEqual(['x'])
+  })
+
+  it('paste via Ctrl+V writes wrapped bracketed text when enabled', async () => {
+    const writes: string[] = []
+    const effects: TerminalKeyEffects = {
+      platform: 'linux',
+      grid: { viewport: [{ text: 'a' }], bracketedPaste: true, applicationCursor: false },
+      write: (data: string) => writes.push(data),
+      copy: () => {},
+      readPaste: () => Promise.resolve('hi'),
+    }
+    dispatchTerminalKey({ key: 'v', modifiers: { ctrl: true } }, effects)
+    await Bun.sleep(1)
+    expect(writes).toEqual([ESC + '[200~hi' + ESC + '[201~'])
   })
 })

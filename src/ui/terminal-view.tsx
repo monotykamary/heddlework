@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { TerminalAppearance, TerminalGridSnapshot, TerminalPlacement, TerminalRow as TerminalGridRow, TerminalSessionId } from '../terminal/types.ts'
-import { encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste, type TerminalKeyEvent } from '../terminal/keys.ts'
+import { dispatchTerminalKey, type TerminalKeyEvent } from '../terminal/keys.ts'
 import type { TerminalSessionService } from '../terminal/service.ts'
 import { copyTextToClipboard } from './clipboard-media.ts'
 import { useTerminalGrid, useTerminalProjectionSuspended, useTerminalServiceSnapshot } from './terminal-context.tsx'
@@ -75,27 +75,16 @@ export const TerminalView = memo(function TerminalView({
   const onKeyDown = useCallback((event: TerminalKeyEvent) => {
     if (!sessionId) return
     const grid = service.grid(sessionId)
-    // WP-01: resolve copy/paste/interrupt before terminal encoding so a copy
-    // command never reaches the PTY, even when the clipboard write fails.
-    const command = resolveTerminalCommand(event, process.platform)
-    if (command === 'copy') {
-      void copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')
-      return
-    }
-    if (command === 'interrupt') {
-      service.write(sessionId, String.fromCharCode(3))
-      return
-    }
-    if (command === 'paste') {
-      void pasteClipboardText().then((text) => {
-        if (!text) return
-        service.write(sessionId, wrapBracketedPaste(text, Boolean(grid?.bracketedPaste)))
-      })
-      return
-    }
-    const encoded = encodeTerminalKey(event, grid?.applicationCursor)
-    if (!encoded) return
-    service.write(sessionId, encoded)
+    // Shared production dispatch seam (WP-01): resolves copy/paste/interrupt
+    // before terminal encoding with injected sinks, so the real handler body is
+    // exercised by an always-run regression without a native GPUI renderer.
+    dispatchTerminalKey(event, {
+      platform: process.platform,
+      grid,
+      write: (data) => service.write(sessionId, data),
+      copy,
+      readPaste: () => pasteClipboardText(),
+    })
   }, [copy, service, sessionId])
 
   const onScroll = useCallback((event: { deltaY?: number }) => {

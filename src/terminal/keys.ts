@@ -154,3 +154,47 @@ export function resolveTerminalCommand(event: TerminalKeyEvent, platform: string
   }
   return 'none'
 }
+
+export interface TerminalKeyGridLike {
+  readonly viewport: readonly { readonly text: string }[]
+  readonly bracketedPaste?: boolean
+  readonly applicationCursor?: boolean
+}
+
+export interface TerminalKeyEffects {
+  readonly platform: string
+  readonly grid: TerminalKeyGridLike | undefined
+  readonly write: (data: string) => void
+  readonly copy: (text: string) => void | Promise<unknown>
+  readonly readPaste: () => Promise<string | undefined>
+}
+
+/**
+ * Production terminal key dispatch (WP-01). This is the seam TerminalView.onKeyDown
+ * calls so the exact handler body can be regression-tested without a native
+ * GPUI renderer. Commands are resolved BEFORE terminal encoding: a copy command
+ * never reaches the PTY (zero bytes, even when the clipboard write fails), plain
+ * Ctrl+C is exactly one ETX, and ordinary/paste keys keep their previous path.
+ */
+export function dispatchTerminalKey(event: TerminalKeyEvent, effects: TerminalKeyEffects): void {
+  const { grid } = effects
+  const command = resolveTerminalCommand(event, effects.platform)
+  if (command === 'copy') {
+    void effects.copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')
+    return
+  }
+  if (command === 'interrupt') {
+    effects.write(String.fromCharCode(3))
+    return
+  }
+  if (command === 'paste') {
+    void effects.readPaste().then((text) => {
+      if (!text) return
+      effects.write(wrapBracketedPaste(text, Boolean(grid?.bracketedPaste)))
+    })
+    return
+  }
+  const encoded = encodeTerminalKey(event, grid?.applicationCursor)
+  if (!encoded) return
+  effects.write(encoded)
+}
