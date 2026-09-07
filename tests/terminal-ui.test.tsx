@@ -1,5 +1,5 @@
 import React from 'react'
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { connectTest } from '@gpuix/react/automation'
 import { createTestRoot, hasNativeTestRenderer } from '@gpuix/react/testing'
 import { DemoTransport } from '../src/pi/demo-transport.ts'
@@ -68,6 +68,48 @@ describeNative('terminal panels', () => {
       expect(terminals.getStateSnapshot()).toBe(stateSnapshot)
       root.renderer.flush()
       expect(root.renderer.getPaintedText()).toContain('x')
+    } finally {
+      root.unmount()
+    }
+  })
+
+  it('routes Ctrl+Shift+C to copy (zero PTY bytes) and plain Ctrl+C to one ETX', async () => {
+    const terminals = new TerminalSessionService({ cwd: '/tmp/heddlework-terminal-ui', backend: new MemoryTerminalBackend() })
+    services.push(terminals)
+    const sessionId = await terminals.spawn({ cols: 80, rows: 24 })
+    const copyInput: string[] = []
+    const writes: string[] = []
+    const originalWrite = terminals.write.bind(terminals)
+    terminals.write = (id: string, data: string) => { writes.push(data); return originalWrite(id, data) }
+    const root = createTestRoot({ width: 800, height: 420 })
+    try {
+      root.render(
+        <TerminalView
+          service={terminals}
+          sessionId={sessionId}
+          placement="bottom"
+          width={800}
+          height={420}
+          appearance="dark"
+          copy={(text) => { copyInput.push(text) }}
+        />,
+      )
+      root.renderer.flush()
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      root.renderer.flush()
+      // Ctrl+Shift+C resolves as a copy command: zero PTY bytes even when the
+      // (empty) copied scope yields an empty payload.
+      expect(writes).toEqual([])
+
+      root.renderer.simulateKeystrokes('ctrl+c')
+      root.renderer.flush()
+      // Plain Ctrl+C remains exactly one interrupt (ETX) write.
+      expect(writes).toEqual([String.fromCharCode(3)])
+
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      root.renderer.flush()
+      // A repeated copy after an interrupt still adds zero PTY bytes.
+      expect(writes).toEqual([String.fromCharCode(3)])
     } finally {
       root.unmount()
     }

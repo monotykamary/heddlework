@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { TerminalAppearance, TerminalGridSnapshot, TerminalPlacement, TerminalRow as TerminalGridRow, TerminalSessionId } from '../terminal/types.ts'
-import { encodeTerminalKey, wrapBracketedPaste, type TerminalKeyEvent } from '../terminal/keys.ts'
+import { encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste, type TerminalKeyEvent } from '../terminal/keys.ts'
 import type { TerminalSessionService } from '../terminal/service.ts'
 import { copyTextToClipboard } from './clipboard-media.ts'
 import { useTerminalGrid, useTerminalProjectionSuspended, useTerminalServiceSnapshot } from './terminal-context.tsx'
@@ -16,6 +16,8 @@ type TerminalCapableRenderer = {
   setTerminalFrame?: (elementId: number, metadata: string, cells: Uint8Array) => void
 }
 
+type TerminalCopy = (text: string) => void | Promise<unknown>
+
 export const TerminalView = memo(function TerminalView({
   service,
   sessionId,
@@ -24,6 +26,7 @@ export const TerminalView = memo(function TerminalView({
   height,
   appearance,
   focusSerial = 1,
+  copy = copyTextToClipboard,
 }: {
   service: TerminalSessionService
   sessionId: TerminalSessionId | undefined
@@ -32,6 +35,7 @@ export const TerminalView = memo(function TerminalView({
   height: number
   appearance: ResolvedTheme
   focusSerial?: number
+  copy?: TerminalCopy
 }) {
   const projectionSuspensionRequested = useTerminalProjectionSuspended()
   const projectionSuspended = placement === 'right' && projectionSuspensionRequested
@@ -71,18 +75,18 @@ export const TerminalView = memo(function TerminalView({
   const onKeyDown = useCallback((event: TerminalKeyEvent) => {
     if (!sessionId) return
     const grid = service.grid(sessionId)
-    const key = (event.key ?? '').toLowerCase()
-    const mods = event.modifiers as { ctrl?: boolean; control?: boolean; alt?: boolean; cmd?: boolean; shift?: boolean } | undefined
-    const ctrl = Boolean(mods?.ctrl || mods?.control)
-    if (ctrl && !mods?.alt && (key === 'c' || key === 'ctrl-c' || key.endsWith('-c'))) {
+    // WP-01: resolve copy/paste/interrupt before terminal encoding so a copy
+    // command never reaches the PTY, even when the clipboard write fails.
+    const command = resolveTerminalCommand(event, process.platform)
+    if (command === 'copy') {
+      void copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')
+      return
+    }
+    if (command === 'interrupt') {
       service.write(sessionId, String.fromCharCode(3))
       return
     }
-    if (key === 'c' && (mods?.cmd || ctrl) && mods?.shift) {
-      void copyTextToClipboard(grid?.viewport.map((row) => row.text).join('\n') ?? '')
-      return
-    }
-    if (key === 'v' && (event.modifiers?.cmd || event.modifiers?.ctrl)) {
+    if (command === 'paste') {
       void pasteClipboardText().then((text) => {
         if (!text) return
         service.write(sessionId, wrapBracketedPaste(text, Boolean(grid?.bracketedPaste)))
@@ -92,7 +96,7 @@ export const TerminalView = memo(function TerminalView({
     const encoded = encodeTerminalKey(event, grid?.applicationCursor)
     if (!encoded) return
     service.write(sessionId, encoded)
-  }, [service, sessionId])
+  }, [copy, service, sessionId])
 
   const onScroll = useCallback((event: { deltaY?: number }) => {
     if (!sessionId) return

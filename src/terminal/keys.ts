@@ -124,3 +124,33 @@ export function wrapBracketedPaste(text: string, enabled: boolean): string {
   if (!enabled) return text
   return ESC + '[200~' + text + ESC + '[201~'
 }
+
+export type TerminalCommand = 'copy' | 'paste' | 'interrupt' | 'none'
+
+/**
+ * Resolve platform copy/paste/interrupt shorthand BEFORE terminal key encoding.
+ *
+ * WP-01 precedence: a copy command must never reach the PTY, even when the
+ * clipboard write fails or the desktop lacks a selected range. Plain Ctrl+C is
+ * retained as exactly one ETX (interrupt); Ctrl+Shift+C (Linux/Windows) and
+ * Command+C (macOS) are copy commands and read zero PTY bytes.
+ */
+export function resolveTerminalCommand(event: TerminalKeyEvent, platform: string): TerminalCommand {
+  const { key, ctrl, alt, cmd, shift } = normalizeTerminalKey(event)
+  if (key === 'c') {
+    if (platform === 'darwin') {
+      if (cmd && !ctrl && !alt) return 'copy'
+      if (cmd) return 'copy'
+      if (ctrl && !cmd && !shift && !alt) return 'interrupt'
+      return 'none'
+    }
+    if (ctrl && shift && !alt && !cmd) return 'copy'
+    if (ctrl && !cmd && !shift && !alt) return 'interrupt'
+    return 'none'
+  }
+  if (key === 'v') {
+    if ((cmd || ctrl) && !alt) return 'paste'
+    return 'none'
+  }
+  return 'none'
+}

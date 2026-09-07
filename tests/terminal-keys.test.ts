@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { encodeTerminalKey, wrapBracketedPaste } from '../src/terminal/keys.ts'
+import { encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste } from '../src/terminal/keys.ts'
 
 const ESC = String.fromCharCode(27)
 
@@ -25,5 +25,40 @@ describe('encodeTerminalKey', () => {
   it('wraps bracketed paste when the emulator enabled it', () => {
     expect(wrapBracketedPaste('hi', false)).toBe('hi')
     expect(wrapBracketedPaste('hi', true)).toBe(ESC + '[200~hi' + ESC + '[201~')
+  })
+})
+
+describe('resolveTerminalCommand', () => {
+  // WP-01 catch-first: Ctrl+Shift+C must never dispatch through the interrupt
+  // (ETX) path. The old view ordered an unqualified ctrl 'c' interrupt before the
+  // copy branch, so Ctrl+Shift+C reached interrupt handling first.
+  it('Linux Ctrl+Shift+C is a copy, not an interrupt', () => {
+    expect(resolveTerminalCommand({ key: 'c', modifiers: { ctrl: true, shift: true } }, 'linux')).toBe('copy')
+  })
+
+  it('Linux plain Ctrl+C stays exactly one interrupt', () => {
+    expect(resolveTerminalCommand({ key: 'c', modifiers: { ctrl: true } }, 'linux')).toBe('interrupt')
+  })
+
+  it('Linux Ctrl+Shift+C with encoding-shy form key string is a copy', () => {
+    expect(resolveTerminalCommand({ key: 'ctrl-shift-c' }, 'linux')).toBe('copy')
+  })
+
+  it('macOS Command+C is a copy', () => {
+    expect(resolveTerminalCommand({ key: 'c', modifiers: { cmd: true } }, 'darwin')).toBe('copy')
+  })
+
+  it('macOS plain Ctrl+C stays an interrupt', () => {
+    expect(resolveTerminalCommand({ key: 'c', modifiers: { ctrl: true } }, 'darwin')).toBe('interrupt')
+  })
+
+  it('paste is preserved for Cmd+V and Ctrl+V', () => {
+    expect(resolveTerminalCommand({ key: 'v', modifiers: { cmd: true } }, 'darwin')).toBe('paste')
+    expect(resolveTerminalCommand({ key: 'v', modifiers: { ctrl: true } }, 'linux')).toBe('paste')
+  })
+
+  it('plain lowercase c is not a terminal command', () => {
+    expect(resolveTerminalCommand({ key: 'c' }, 'linux')).toBe('none')
+    expect(resolveTerminalCommand({ key: 'x' }, 'linux')).toBe('none')
   })
 })
