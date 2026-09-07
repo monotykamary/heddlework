@@ -1,7 +1,8 @@
+import { omarchyThemeCandidates, parseOmarchyPalette } from '../src/ui/omarchy-theme-source.ts'
 import { afterEach, describe, expect, it } from 'bun:test'
 import { EventEmitter } from 'node:events'
-import { applyResolvedTheme, parseOmarchyPalette, darkColors, colors } from '../src/ui/theme.ts'
-import { ThemeManager, omarchyThemePath } from '../src/ui/theme-manager.ts'
+import { applyResolvedTheme, darkColors, colors } from '../src/ui/theme.ts'
+import { ThemeManager } from '../src/ui/theme-manager.ts'
 
 afterEach(() => {
   applyResolvedTheme('dark')
@@ -16,11 +17,30 @@ const TOML = [
 ].join('\n')
 
 describe('parseOmarchyPalette', () => {
+  it('rejects an entire replacement when a recognized field is malformed', () => {
+    expect(parseOmarchyPalette('background = "#123456"\nforeground = "#12')).toBeUndefined()
+  })
+
+  it('does not interpret nested table colors as root palette fields', () => {
+    expect(parseOmarchyPalette('[application]\nbackground = "#123456"')).toBeUndefined()
+  })
+
+  it('accepts distinct aliases in file order while rejecting repeated raw keys', () => {
+    for (const [alias, key, target] of [['bg', 'background', 'background'], ['fg', 'foreground', 'text'], ['panel', 'sidebar', 'sidebar']] as const) {
+      expect(parseOmarchyPalette(`${alias} = "#123456"\n${key} = "#abcdef"`)?.[target]).toBe('#abcdef')
+      expect(parseOmarchyPalette(`${key} = "#abcdef"\n${alias} = "#123456"`)?.[target]).toBe('#123456')
+      expect(parseOmarchyPalette(`${alias} = "#123456"\n${alias} = "#abcdef"`)).toBeUndefined()
+    }
+  })
+
+  it('rejects duplicate recognized assignments', () => {
+    expect(parseOmarchyPalette('background = "#123456"\nbackground = "#abcdef"')).toBeUndefined()
+  })
   it('maps semantic colors onto the palette', () => {
     const overlay = parseOmarchyPalette(TOML)
     expect(overlay?.background).toBe('#140000')
     expect(overlay?.window).toBe('#140000')
-    expect(overlay?.text).toBe('#FED700')
+    expect(overlay?.text).toBe('#fed700')
     expect(overlay?.primary).toBe('#3b6cfe')
     expect(overlay?.textMuted).toBe('#6f6766')
   })
@@ -59,6 +79,36 @@ function makeFakeMonitor() {
 }
 
 describe('ThemeManager event source lifecycle', () => {
+  it('polls palettes without probing appearance while the monitor is alive, then resumes detection on exit', async () => {
+    const monitor = makeFakeMonitor()
+    let calls = 0
+    let appearance: 'dark' | 'light' = 'dark'
+    let content = 'background = "#123456"'
+    const manager = new ThemeManager({
+      preferencePath: false, resolveSystemTheme: () => { calls++; return appearance },
+      omarchyCandidates: omarchyThemeCandidates('linux', {}, '/fixture'),
+      enableEventSource: true, pollIntervalMs: 2, debounceMs: 1,
+    }, { platform: 'linux', spawnProcess: () => monitor.process, watcher: () => undefined, readFile: () => content })
+    manager.start()
+    try {
+      const initialCalls = calls
+      content = 'background = "#abcdef"'
+      await Bun.sleep(20)
+      expect(colors.background).toBe('#abcdef')
+      expect(calls).toBe(initialCalls)
+      appearance = 'light'
+      monitor.process.stdout.emit('data')
+      await Bun.sleep(10)
+      expect(manager.getSnapshot().resolved).toBe('light')
+      expect(calls).toBeGreaterThan(initialCalls)
+      monitor.events.emit('exit', 1)
+      const exitCalls = calls
+      appearance = 'dark'
+      await Bun.sleep(10)
+      expect(calls).toBeGreaterThan(exitCalls)
+      expect(manager.getSnapshot().resolved).toBe('dark')
+    } finally { manager.dispose() }
+  })
   it('runs polling under an injected resolver and releases on dispose', () => {
     // With no event sources, start() falls back to a polling timer that the
     // constructor keeps tracked for reversible teardown.
@@ -66,7 +116,7 @@ describe('ThemeManager event source lifecycle', () => {
     const manager = new ThemeManager({
       preferencePath: false,
       resolveSystemTheme: () => systemTheme,
-      omarchyPath: false,
+      omarchyCandidates: [],
       enableEventSource: false,
     })
     manager.start()
@@ -81,7 +131,7 @@ describe('ThemeManager event source lifecycle', () => {
       preferencePath: false,
       resolveSystemTheme: () => systemTheme,
       pollIntervalMs: 1,
-      omarchyPath: false,
+      omarchyCandidates: [],
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -107,7 +157,7 @@ describe('ThemeManager event source lifecycle', () => {
       preferencePath: false,
       resolveSystemTheme: () => systemTheme,
       pollIntervalMs: 1,
-      omarchyPath: false,
+      omarchyCandidates: [],
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -125,13 +175,13 @@ describe('ThemeManager event source lifecycle', () => {
     }
   })
 
-  it('refreshes Omarchy colors while an explicit theme mode is selected', () => {
+  it('refreshes Omarchy colors while an explicit theme mode is selected', async () => {
     let content = 'background = "#140000"'
     let onChange: (() => void) | undefined
     const manager = new ThemeManager({
       preferencePath: false,
       resolveSystemTheme: () => 'dark',
-      omarchyPath: '/tmp/fake-omarchy/colors.toml',
+      omarchyCandidates: [{ kind: 'state', path: '/tmp/fake-omarchy/theme/colors.toml', watchRoot: '/tmp/fake-omarchy' }], debounceMs: 1,
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -149,9 +199,10 @@ describe('ThemeManager event source lifecycle', () => {
 
     content = 'background = "#220000"'
     onChange?.()
+    await Bun.sleep(10)
 
     expect(colors.background).toBe('#220000')
-    expect(manager.getSnapshot()).toEqual({ mode: 'light', resolved: 'light' })
+    expect(manager.getSnapshot()).toMatchObject({ mode: 'light', resolved: 'light' })
     expect(notifications).toBe(1)
     manager.dispose()
   })
@@ -163,7 +214,7 @@ describe('ThemeManager event source lifecycle', () => {
       preferencePath: false,
       resolveSystemTheme: () => 'dark',
       pollIntervalMs: 1,
-      omarchyPath: '/tmp/fake-omarchy/colors.toml',
+      omarchyCandidates: [{ kind: 'state', path: '/tmp/fake-omarchy/theme/colors.toml', watchRoot: '/tmp/fake-omarchy' }], debounceMs: 1,
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -191,7 +242,7 @@ describe('ThemeManager event source lifecycle', () => {
       preferencePath: false,
       resolveSystemTheme: () => 'dark',
       pollIntervalMs: 1,
-      omarchyPath: '/tmp/fake-omarchy/colors.toml',
+      omarchyCandidates: [{ kind: 'state', path: '/tmp/fake-omarchy/theme/colors.toml', watchRoot: '/tmp/fake-omarchy' }], debounceMs: 1,
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -221,7 +272,7 @@ describe('ThemeManager event source lifecycle', () => {
     const manager = new ThemeManager({
       preferencePath: false,
       resolveSystemTheme: () => 'dark',
-      omarchyPath: '/tmp/fake-omarchy/colors.toml',
+      omarchyCandidates: [{ kind: 'state', path: '/tmp/fake-omarchy/theme/colors.toml', watchRoot: '/tmp/fake-omarchy' }], debounceMs: 1,
       enableEventSource: true,
     }, {
       platform: 'linux',
@@ -235,9 +286,117 @@ describe('ThemeManager event source lifecycle', () => {
   })
 })
 
-describe('omarchyThemePath', () => {
-  it('derives the current colors file under XDG_CONFIG_HOME', () => {
-    expect(omarchyThemePath('linux', { XDG_CONFIG_HOME: '/cf' } as NodeJS.ProcessEnv, '/home/u')).toBe('/cf/omarchy/current/theme/colors.toml')
-    expect(omarchyThemePath('darwin', { XDG_CONFIG_HOME: '/cf' } as NodeJS.ProcessEnv, '/home/u')).toBe('')
+describe('source transitions', () => {
+  it('recovers missing roots and watches real directory replacements without a palette reset', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join, dirname } = await import('node:path')
+    const home = mkdtempSync(join(tmpdir(), 'heddlework-omarchy-'))
+    const candidates = omarchyThemeCandidates('linux', {}, home)
+    const path = candidates[0]!.path
+    const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: candidates, enableEventSource: true, pollIntervalMs: 20, debounceMs: 2 }, { platform: 'linux', spawnProcess: () => undefined })
+    const until = async (predicate: () => boolean) => {
+      const deadline = Date.now() + 2_000
+      while (!predicate() && Date.now() < deadline) await Bun.sleep(5)
+      expect(predicate()).toBe(true)
+    }
+    manager.start()
+    try {
+      expect(manager.getSnapshot().palette.applied).toBe('builtin')
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, 'background = "#123456"')
+      await until(() => colors.background === '#123456')
+      const observed: string[] = []
+      manager.subscribe(() => observed.push(colors.background))
+      rmSync(dirname(path), { recursive: true })
+      await until(() => manager.getSnapshot().palette.health === 'missing')
+      expect(colors.background).toBe('#123456')
+      mkdirSync(dirname(path))
+      writeFileSync(path, 'background = "#654321"')
+      await until(() => colors.background === '#654321')
+      writeFileSync(path, 'background = "#abcdef"')
+      await until(() => colors.background === '#abcdef')
+      writeFileSync(path, 'background = "#12')
+      await until(() => manager.getSnapshot().palette.health === 'malformed')
+      expect(colors.background).toBe('#abcdef')
+      expect(observed).not.toContain(darkColors.background)
+    } finally {
+      manager.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('retains provenance through canonical failures and replaces whole overlays on recovery', () => {
+    const candidates = omarchyThemeCandidates('linux', {}, '/fixture')
+    const documents = new Map<string, string>()
+    const statePath = candidates[0]!.path
+    const legacyPath = candidates[1]!.path
+    documents.set(legacyPath, 'background = "#123456"\naccent = "#abcdef"')
+    let denied = false
+    const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: candidates }, {
+      readFile: path => { if (denied && path === statePath) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return documents.get(path) },
+    })
+    try {
+      expect(manager.getSnapshot().palette.source).toBe('legacy')
+      documents.set(statePath, 'background = "#12')
+      manager.refreshSystemTheme()
+      expect(manager.getSnapshot().palette).toMatchObject({ applied: 'last-good', source: 'state', health: 'malformed', appliedSource: { kind: 'legacy' } })
+      expect(colors.background).toBe('#123456')
+      denied = true
+      manager.refreshSystemTheme()
+      expect(manager.getSnapshot().palette.health).toBe('read-error')
+      denied = false
+      documents.set(statePath, 'background = "#ABCDEF"')
+      manager.refreshSystemTheme()
+      expect(colors.background).toBe('#abcdef')
+      expect(colors.primary).toBe(darkColors.primary)
+      const snapshot = manager.getSnapshot()
+      documents.set(statePath, 'background = "#abcdef" # same palette')
+      manager.refreshSystemTheme()
+      expect(manager.getSnapshot()).toBe(snapshot)
+      documents.delete(statePath)
+      manager.refreshSystemTheme()
+      expect(manager.getSnapshot().palette).toMatchObject({ applied: 'last-good', source: 'state', health: 'missing' })
+      expect(colors.background).toBe('#abcdef')
+      manager.setMode('light')
+      expect(colors.background).toBe('#abcdef')
+    } finally { manager.dispose() }
+  })
+
+  it('coalesces bursts and ignores callbacks from disposed generations', async () => {
+    let content = 'background = "#123456"'
+    const callbacks: Array<() => void> = []
+    const manager = new ThemeManager({ preferencePath: false, resolveSystemTheme: () => 'dark', omarchyCandidates: omarchyThemeCandidates('linux', {}, '/fixture'), enableEventSource: true, debounceMs: 1 }, {
+      platform: 'linux', spawnProcess: () => undefined, readFile: () => content,
+      watcher: (_path, callback) => { callbacks.push(callback); return { dispose() {} } },
+    })
+    manager.start()
+    let notifications = 0
+    manager.subscribe(() => { notifications++ })
+    content = 'background = "#654321"'
+    const old = [...callbacks]
+    old.forEach(callback => callback())
+    await Bun.sleep(10)
+    expect(notifications).toBe(1)
+    manager.dispose()
+    manager.dispose()
+    manager.start()
+    content = 'background = "#111111"'
+    old.forEach(callback => callback())
+    await Bun.sleep(10)
+    expect(colors.background).toBe('#654321')
+    callbacks.at(-1)?.()
+    manager.dispose()
+    await Bun.sleep(10)
+    expect(colors.background).toBe('#654321')
+  })
+})
+
+describe('omarchyThemeCandidates', () => {
+  it('uses canonical state before legacy config and validates XDG roots', () => {
+    expect(omarchyThemeCandidates('linux', { XDG_STATE_HOME: '/st', XDG_CONFIG_HOME: '/cf' }, '/home/u').map(c => c.path)).toEqual(['/st/omarchy/current/theme/colors.toml', '/cf/omarchy/current/theme/colors.toml'])
+    expect(omarchyThemeCandidates('linux', { XDG_STATE_HOME: 'relative', XDG_CONFIG_HOME: '' }, '/home/u').map(c => c.path)).toEqual(['/home/u/.local/state/omarchy/current/theme/colors.toml', '/home/u/.config/omarchy/current/theme/colors.toml'])
+    expect(omarchyThemeCandidates('darwin', {}, '/home/u')).toEqual([])
+    expect(omarchyThemeCandidates('win32', {}, '/home/u')).toEqual([])
   })
 })

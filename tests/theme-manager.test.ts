@@ -21,13 +21,13 @@ describe('ThemeManager', () => {
 
     manager.setMode('light')
 
-    expect(manager.getSnapshot()).toEqual({ mode: 'light', resolved: 'light' })
+    expect(manager.getSnapshot()).toMatchObject({ mode: 'light', resolved: 'light' })
     expect(colors.background).toBe(lightColors.background)
     expect(nativeTheme.appearance).toBe('light')
     expect(JSON.parse(readFileSync(preferencePath, 'utf8'))).toEqual({ themeMode: 'light' })
 
     const restored = new ThemeManager({ preferencePath, resolveSystemTheme: () => 'dark' })
-    expect(restored.getSnapshot()).toEqual({ mode: 'light', resolved: 'light' })
+    expect(restored.getSnapshot()).toMatchObject({ mode: 'light', resolved: 'light' })
     manager.dispose()
     restored.dispose()
   })
@@ -40,14 +40,14 @@ describe('ThemeManager', () => {
 
     systemTheme = 'light'
     manager.refreshSystemTheme()
-    expect(manager.getSnapshot()).toEqual({ mode: 'system', resolved: 'light' })
+    expect(manager.getSnapshot()).toMatchObject({ mode: 'system', resolved: 'light' })
     expect(colors.background).toBe(lightColors.background)
     expect(notifications).toBe(1)
 
     manager.setMode('dark')
     systemTheme = 'light'
     manager.refreshSystemTheme()
-    expect(manager.getSnapshot()).toEqual({ mode: 'dark', resolved: 'dark' })
+    expect(manager.getSnapshot()).toMatchObject({ mode: 'dark', resolved: 'dark' })
     expect(colors.background).toBe(darkColors.background)
     manager.dispose()
   })

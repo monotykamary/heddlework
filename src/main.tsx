@@ -7,7 +7,8 @@ import { createWindowOptions } from './window-options.ts'
 import { WorkbenchKernel } from './core/kernel.ts'
 import { WorkbenchApp } from './ui/app.tsx'
 import { isGpuixWindowCloseRace } from './ui/native-window-lifecycle.ts'
-import { ThemeManager, omarchyThemePath } from './ui/theme-manager.ts'
+import { ThemeManager } from './ui/theme-manager.ts'
+import { omarchyThemeCandidates } from './ui/omarchy-theme-source.ts'
 import { createCoreUiExtensionPlugin } from './ui/core-extension.tsx'
 import { workbenchUiHostPlugin, workbenchUiRegistryToken } from './ui/extensions.ts'
 import { coreToolPresentersPlugin, toolPresenterSlot } from './ui/tool-presenters.ts'
@@ -47,7 +48,7 @@ const themeManager = new ThemeManager({
   // On Linux, follow desktop portal/theme events and, when an Omarchy palette
   // is present, overlay it onto the resolved theme. Both are opt-in and degrade
   // to the built-in palette (and polling) elsewhere.
-  ...(process.platform === 'linux' ? { enableEventSource: true, omarchyPath: omarchyThemePath() } : {}),
+  ...(process.platform === 'linux' ? { enableEventSource: true, omarchyCandidates: omarchyThemeCandidates() } : {}),
 })
 
 const kernel = new WorkbenchKernel()
