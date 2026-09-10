@@ -52,6 +52,8 @@ jobs:
           addon=$(find node_modules/.cache/heddlework-gpuix -type f -name 'gpuix-native.linux-x64-gnu.node' -print -quit)
           test -n "$addon"
           echo "NAPI_RS_NATIVE_LIBRARY_PATH=$addon" >> "$GITHUB_ENV"
+      - name: Prove the source-built addon loads
+        run: bun -e "require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH); console.log('source-built addon loads')"
       - run: bun run typecheck:web
       - run: bun run build:web
       - run: bunx playwright install --with-deps chromium

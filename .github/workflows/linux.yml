@@ -44,6 +44,8 @@ jobs:
             mesa-vulkan-drivers mutter pkg-config sway vulkan-tools wayland-protocols \
             weston x11-utils xdotool xvfb
       - run: bun install --frozen-lockfile
+      - name: Drop the published react package so setup can link the source build
+        run: rm -rf node_modules/@gpuix/react
       - name: Build pinned Heddlework GPUix runtime
         run: bun scripts/install-gpuix.ts
       - name: Run real compositor smoke
