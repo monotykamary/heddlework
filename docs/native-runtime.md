@@ -27,9 +27,20 @@ bun run check:native
 ```
 
 This checks the patch checksum, the installed `@gpuix/*` version against the
-manifest, the platform addon, and each capability. Required failures exit
-nonzero; missing optional capabilities are reported as `degraded` with a
-remediation line. CI runs it on both the macOS and Linux jobs.
+manifest, the platform addon, the resolved addon path and SHA-256, and each
+capability. When the wrapper package can be loaded, a declaration that the
+addon does not actually export is a failure — that is the stale-binary class
+where TypeScript types were patched but the `.node` was not rebuilt. Required
+failures exit nonzero; missing optional capabilities are reported as `degraded`
+with a remediation line. CI runs it on both the macOS and Linux jobs. A
+headless job may leave compositor-dependent rows unexercised; it must not treat
+a declaration match as live portal or terminal-frame behavior.
+
+Do not copy a rebuilt addon into `node_modules` as the committed contract.
+Prepare patched packages with `bun scripts/build-native-runtime.ts --build`
+from an empty `external/` when needed, then consume them through the recorded
+resolution path. `file:` switches belong in `native-runtime.json` and the
+lockfile together, never as an unrecorded local overwrite.
 
 At startup in a development checkout, `src/main.tsx` runs the same verification
 and logs degradations before the first render. Packaged builds skip the probe
@@ -144,6 +155,16 @@ through the native backend, received a real light-to-dark settings change with
 no gsettings monitor child, and shut down cleanly on SIGTERM. The original
 preference was restored. The browser-free executable is `dist/heddlework`.
 The complete patch applies to clean pinned GPUIX and Zed source trees.
+
+The addon was rebuilt from the full current patch on 2026-09-10 (Omarchy,
+Hyprland/Wayland, x86_64) and reinstalled the same way, SHA-256
+`dd8d2d5b50b26f9d48ba910841090058c0a1817b6b4457bbb6fd12ddf4815ba4` (48 MB
+release build with test support). Live probes on that install confirmed
+`subscribeSystemAppearance` (initial `light` from the portal), the module export
+`openDirectoryDialog`, and `GpuixRenderer` instance methods
+`supportsNativeTerminal(): true` / `setTerminalFrame`, so the terminal uses
+raw frame uploads instead of base64 props and directory picking needs no CLI
+portal child. `bun run check:native` reports 13 ok, 0 degraded against it.
 
 GNOME and KDE desktop sessions were not exercised; Hyprland and private D-Bus
 results must not be presented as acceptance for those desktops. The locally

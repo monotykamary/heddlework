@@ -63,11 +63,16 @@
     },
     {
       "id": "native.terminal-frame",
-      "kind": "native-export",
-      "export": "setTerminalFrame",
+      "kind": "react-type",
+      "package": "native",
+      "scope": "GpuixRenderer",
+      "patterns": [
+        "supportsNativeTerminal(): boolean",
+        "setTerminalFrame(elementId: number, metadata: string, cells: Buffer): void"
+      ],
       "component": "terminal",
       "required": false,
-      "note": "Raw terminal frame uploads skip base64 encoding; Heddlework falls back to the frame-prop path when absent."
+      "note": "Raw terminal frame uploads skip base64 encoding; Heddlework falls back to the frame-prop path when absent. Declared as renderer-instance methods, so the probe searches the GpuixRenderer class body."
     },
     {
       "id": "render.browser-options",

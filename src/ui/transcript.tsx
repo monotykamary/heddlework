@@ -86,6 +86,7 @@ export const Transcript = memo(function Transcript({
   onLoadEarlier,
   appearance,
   interactionDisabled = false,
+  suspended = false,
 }: {
   state: WorkbenchState
   presenters: ReadonlyMap<string, ToolPresenter>
@@ -95,6 +96,7 @@ export const Transcript = memo(function Transcript({
   onLoadEarlier?(): void | Promise<void>
   appearance?: ResolvedTheme
   interactionDisabled?: boolean
+  suspended?: boolean
 }) {
   const sessionKey = state.session.sessionFile ?? state.session.sessionId ?? state.workspacePath
   const paging = useRef(false)
@@ -144,17 +146,18 @@ export const Transcript = memo(function Transcript({
     [items],
   )
   useEffect(() => {
+    if (suspended) return
     const displayedIds = new Set(displayedAssistants.map((item) => item.id))
-    const displayedTexts = new Set(displayedAssistants.map((item) => item.text))
-    const disappeared = previousAssistants.current.filter((item) => !displayedIds.has(item.id) && !displayedTexts.has(item.text))
+    const stillPresent = (item: AssistantTimelineItem) => displayedIds.has(item.id) || displayedAssistants.some((candidate) => candidate.text === item.text)
+    const disappeared = previousAssistants.current.filter((item) => !stillPresent(item))
     previousAssistants.current = displayedAssistants
     setRetiringAssistants((current) => {
-      const remaining = current.filter((item) => !displayedIds.has(item.id) && !displayedTexts.has(item.text))
+      const remaining = current.filter((item) => !stillPresent(item))
       if (disappeared.length === 0) return remaining.length === current.length ? current : remaining
       const known = new Set(remaining.map((item) => item.id))
       return [...remaining, ...disappeared.filter((item) => !known.has(item.id))]
     })
-  }, [displayedAssistants])
+  }, [displayedAssistants, suspended])
   useEffect(() => {
     if (state.session.isStreaming && !wasStreaming.current) setFollowTail(true)
     wasStreaming.current = state.session.isStreaming
@@ -185,6 +188,11 @@ export const Transcript = memo(function Transcript({
     return next
   }, [items, liveTraceId, projectedRows, retiringAssistants, state.session.isStreaming, traceLengths])
   const rowIndexById = useMemo(() => new Map(rows.map((row, index) => [row.id, index])), [rows])
+  const frozenRows = useRef(rows)
+  useEffect(() => {
+    if (!suspended) frozenRows.current = rows
+  }, [rows, suspended])
+  const renderRows = suspended ? frozenRows.current : rows
   // Spread retained-tree growth across frames; native virtualization handles layout and paint per direct row.
   useEffect(() => {
     if (disclosures.sessionKey !== sessionKey) return
@@ -297,7 +305,7 @@ export const Transcript = memo(function Transcript({
         estimatedItemHeight={TRANSCRIPT_ESTIMATED_ROW_HEIGHT}
         style={{ flexGrow: 1, minHeight: 0, width: '100%' }}
       >
-        {rows.map((row) => (
+        {renderRows.map((row) => (
           <TranscriptRowTransition key={row.id} row={row} live={row.kind === 'trace-header' && row.id === liveTraceId} persist={row.kind === 'trace-header' && stickyHeaderIds.current.has(row.id)}>
           <ProjectedTranscriptRow
             row={row}

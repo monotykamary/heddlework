@@ -14,7 +14,7 @@ export interface NativeRuntimeCapability {
   patterns?: string[]
   /** The package whose declarations a react-type probe searches; defaults to "react". */
   package?: 'react' | 'native'
-  /** Restrict a react-type probe to the body of one interface, e.g. "MotionStyle". */
+  /** Restrict a react-type probe to the body of one interface or class, e.g. "MotionStyle" or "GpuixRenderer". */
   scope?: string
   component: string
   required: boolean
@@ -62,6 +62,8 @@ export interface VerifyNativeRuntimeOptions {
   root?: string
   platform?: NodeJS.Platform
   arch?: string
+  /** Injected addon loader so tests can prove declaration/binary mismatch without dlopen. */
+  loadNativeModule?(specifier: string): Record<string, unknown> | undefined
 }
 
 export function platformTargetKey(platform: string, arch: string): string {
@@ -112,13 +114,38 @@ function collectDtsFiles(directory: string, depth = 0, acc: string[] = []): stri
   return acc
 }
 
-function interfaceBody(source: string, name: string): string {
-  const start = source.indexOf(`interface ${name}`)
-  if (start === -1) return ''
-  const bodyStart = source.indexOf('{', start)
-  if (bodyStart === -1) return ''
-  const end = source.indexOf('\n}', bodyStart)
-  return end === -1 ? source.slice(bodyStart) : source.slice(bodyStart, end)
+type NativeLoadResult =
+  | { status: 'loaded'; module: Record<string, unknown> }
+  | { status: 'unavailable' }
+  | { status: 'failed'; error: string }
+
+function loadNativeExports(root: string, loader?: (specifier: string) => Record<string, unknown> | undefined): NativeLoadResult {
+  const specifier = join(root, 'node_modules/@gpuix/native')
+  const attempt = (): NativeLoadResult => {
+    try {
+      const loaded = loader ? loader(specifier) : (require(specifier) as Record<string, unknown>)
+      return loaded && typeof loaded === 'object'
+        ? { status: 'loaded', module: loaded }
+        : { status: 'failed', error: 'module shape invalid' }
+    } catch (error) {
+      return { status: 'failed', error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  if (loader) return attempt()
+  if (!existsSync(join(specifier, 'index.js'))) return { status: 'unavailable' }
+  return attempt()
+}
+
+function declarationBody(source: string, name: string): string {
+  for (const marker of [`interface ${name}`, `class ${name}`]) {
+    const start = source.indexOf(marker)
+    if (start === -1) continue
+    const bodyStart = source.indexOf('{', start)
+    if (bodyStart === -1) continue
+    const end = source.indexOf('\n}', bodyStart)
+    return end === -1 ? source.slice(bodyStart) : source.slice(bodyStart, end)
+  }
+  return ''
 }
 
 function declaresModuleExport(dts: string, name: string): boolean {
@@ -250,6 +277,17 @@ export function verifyNativeRuntime(options: VerifyNativeRuntimeOptions = {}): N
       detail: ok ? `${target.package} present (${target.addon})` : `${relative(root, addonPath)} is missing`,
       ...(ok ? {} : { remediation: 'Run bun install --frozen-lockfile so the platform-specific @gpuix/native package is available.' }),
     })
+    if (ok) {
+      const wrapperAddon = join(root, 'node_modules/@gpuix/native', target.addon)
+      const resolved = existsSync(wrapperAddon) ? wrapperAddon : addonPath
+      checks.push({
+        id: 'native.addon.identity',
+        ok: true,
+        required: false,
+        component: 'core',
+        detail: `${relative(root, resolved)} sha256 ${sha256File(resolved)}`,
+      })
+    }
   }
 
   if (manifest.toolchain?.bun) {
@@ -264,21 +302,38 @@ export function verifyNativeRuntime(options: VerifyNativeRuntimeOptions = {}): N
     const reactDts = collectDtsFiles(join(root, 'node_modules/@gpuix/react'))
   const nativeDtsPath = join(root, 'node_modules/@gpuix/native/index.d.ts')
   const nativeDts = existsSync(nativeDtsPath) ? readFileSync(nativeDtsPath, 'utf8') : ''
+  const nativeLoad = loadNativeExports(root, options.loadNativeModule)
+  if (nativeLoad.status === 'failed') {
+    checks.push({
+      id: 'native.addon.load',
+      ok: false,
+      required: false,
+      component: 'core',
+      detail: `installed @gpuix/native failed to load: ${nativeLoad.error}`,
+      remediation: 'Rebuild or reinstall the patched runtime so the addon loads; declarations alone cannot verify an unloadable binary.',
+    })
+  }
   for (const capability of manifest.capabilities) {
     let ok = false
     let detail: string
     if (capability.kind === 'native-export') {
       const declared = capability.export ? declaresModuleExport(nativeDts, capability.export) : false
-      ok = declared
-      detail = declared
-        ? `installed @gpuix/native declares ${capability.export}`
-        : `installed @gpuix/native does not export ${capability.export}`
+      const loaded = nativeLoad.status === 'loaded' && capability.export ? typeof nativeLoad.module[capability.export] === 'function' : undefined
+      const loadFailed = nativeLoad.status === 'failed'
+      ok = declared && !loadFailed && loaded !== false
+      detail = !declared
+        ? `installed @gpuix/native does not export ${capability.export}`
+        : loadFailed
+          ? `installed @gpuix/native declares ${capability.export} but the addon failed to load, so the export is unverified`
+          : loaded === false
+            ? `installed @gpuix/native declares ${capability.export} but the loaded addon does not export it`
+            : `installed @gpuix/native declares ${capability.export}`
     } else {
       const patterns = capability.patterns ?? []
       const haystack = capability.package === 'native'
         ? nativeDts
         : reactDts.map((path) => readFileSync(path, 'utf8')).join('\n')
-      const window = capability.scope ? interfaceBody(haystack, capability.scope) : haystack
+      const window = capability.scope ? declarationBody(haystack, capability.scope) : haystack
       const missing = patterns.filter((pattern) => !window.includes(pattern))
       ok = patterns.length > 0 && missing.length === 0
       const wherePkg = capability.package === 'native' ? '@gpuix/native' : '@gpuix/react'

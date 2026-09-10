@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useGpuixRequired } from '@gpuix/react'
 import type { BrowserSessionService } from '../browser/service.ts'
 import type { BrowserEngineKind, BrowserEngineStatus, BrowserNativeState } from '../browser/types.ts'
@@ -23,6 +23,7 @@ interface BrowserValueEvent {
 export function BrowserNativeHost({ service, suspended = false }: { service: BrowserSessionService; suspended?: boolean }) {
   const renderer = useGpuixRequired() as BrowserRenderer
   const snapshot = useBrowserSnapshot(service)
+  const lastBounds = useRef(new Map<string, { x: number; y: number; width: number; height: number }>())
   const engine = useMemo(() => probeBrowserEngine(renderer), [renderer])
 
   useEffect(() => service.setEngine(engine), [engine, service])
@@ -37,7 +38,8 @@ export function BrowserNativeHost({ service, suspended = false }: { service: Bro
         const profile = service.runtimeProfile(tab.profileId)
         if (!profile) return null
         const shown = !suspended && placement?.tabId === tab.id && placement.visible
-        const bounds = shown ? placement.bounds : { x: 0, y: 0, width: 1, height: 1 }
+        if (shown && placement) lastBounds.current.set(tab.id, placement.bounds)
+        const bounds = shown && placement ? placement.bounds : lastBounds.current.get(tab.id) ?? { x: 0, y: 0, width: 1, height: 1 }
         return (
           <browser
             key={`${tab.id}:${tab.generation}`}

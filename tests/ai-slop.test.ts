@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect, beforeAll, afterAll } from "bun:test";
@@ -65,6 +65,18 @@ test("green: diff with real title and no leftovers exits 0", () => {
     PR_BODY: "Adds module b with a real description and enough details to pass.",
   });
   expect(r.code).toBe(0);
+});
+
+test("green: unreadable untracked artifacts are skipped, not fatal", () => {
+  const junk = join(ROOT, "__unreadable_probe__.build");
+  writeFileSync(junk, "stale");
+  chmodSync(junk, 0o000);
+  try {
+    const r = run({});
+    expect(r.out).not.toContain("EACCES");
+  } finally {
+    rmSync(junk, { force: true });
+  }
 });
 
 test("red: whole-tree scan flags a merge marker as error (exit 1)", () => {

@@ -210,4 +210,85 @@ describe('verifyNativeRuntime', () => {
     expect(check?.ok).toBe(false)
     expect(check?.required).toBe(false)
   })
-});
+
+  it('recognizes renderer methods through a class-scoped react-type capability', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    manifest.capabilities.push({
+      id: 'native.terminal-frame',
+      kind: 'react-type',
+      package: 'native',
+      scope: 'GpuixRenderer',
+      patterns: ['supportsNativeTerminal(): boolean', 'setTerminalFrame(elementId: number, metadata: string, cells: Buffer): void'],
+      component: 'terminal',
+      required: false,
+    })
+    writeFileSync(join(root, 'native-runtime.json'), JSON.stringify(manifest))
+    writeFileSync(join(root, 'node_modules/@gpuix/native/index.d.ts'),
+      'export declare function hasTestGpuixRenderer(): boolean\nexport declare class GpuixRenderer {\n  supportsNativeTerminal(): boolean\n  setTerminalFrame(elementId: number, metadata: string, cells: Buffer): void\n}\n')
+
+    const report = verifyNativeRuntime({ root })
+    expect(report.checks.find((c) => c.id === 'capability.native.terminal-frame')?.ok).toBe(true)
+
+    // A runtime missing one of the methods degrades the capability.
+    writeFileSync(join(root, 'node_modules/@gpuix/native/index.d.ts'),
+      'export declare function hasTestGpuixRenderer(): boolean\nexport declare class GpuixRenderer {\n  supportsNativeTerminal(): boolean\n}\n')
+    const degraded = verifyNativeRuntime({ root })
+    expect(degraded.checks.find((c) => c.id === 'capability.native.terminal-frame')?.ok).toBe(false)
+  })
+
+  it('rejects declarations that the loaded addon does not export', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    manifest.capabilities.push({
+      id: 'native.system-appearance',
+      kind: 'native-export',
+      export: 'subscribeSystemAppearance',
+      component: 'desktop',
+      required: true,
+    })
+    writeFileSync(join(root, 'native-runtime.json'), JSON.stringify(manifest))
+    writeFileSync(
+      join(root, 'node_modules/@gpuix/native/index.d.ts'),
+      'export declare function hasTestGpuixRenderer(): boolean\nexport declare function subscribeSystemAppearance(listener: (event: unknown) => void): { dispose(): void }\n',
+    )
+    const report = verifyNativeRuntime({
+      root,
+      loadNativeModule: () => ({ hasTestGpuixRenderer: () => true }),
+    })
+    expect(report.ok).toBe(false)
+    expect(report.checks.find((check) => check.id === 'capability.native.system-appearance')).toMatchObject({
+      ok: false,
+      required: true,
+    })
+    expect(report.checks.find((check) => check.id === 'capability.native.system-appearance')?.detail).toContain('loaded addon does not export')
+  })
+
+  it('fails native-export capabilities when the installed addon cannot load', () => {
+    const root = makeFixtureRoot()
+    const manifest = seedRuntimeFixture(root)
+    manifest.capabilities.push({
+      id: 'native.system-appearance',
+      kind: 'native-export',
+      export: 'subscribeSystemAppearance',
+      component: 'desktop',
+      required: true,
+    })
+    writeFileSync(join(root, 'native-runtime.json'), JSON.stringify(manifest))
+    writeFileSync(join(root, 'node_modules/@gpuix/native/index.js'), 'module.exports = {}\n')
+    writeFileSync(
+      join(root, 'node_modules/@gpuix/native/index.d.ts'),
+      'export declare function hasTestGpuixRenderer(): boolean\nexport declare function subscribeSystemAppearance(listener: (event: unknown) => void): { dispose(): void }\n',
+    )
+    const report = verifyNativeRuntime({
+      root,
+      loadNativeModule: () => {
+        throw new Error('dlopen failed: missing shared library')
+      },
+    })
+    expect(report.ok).toBe(false)
+    expect(report.checks.find((check) => check.id === 'native.addon.load')?.detail).toContain('failed to load')
+    expect(report.checks.find((check) => check.id === 'capability.native.system-appearance')).toMatchObject({ ok: false, required: true })
+    expect(report.checks.find((check) => check.id === 'capability.native.system-appearance')?.detail).toContain('failed to load')
+  })
+})

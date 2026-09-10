@@ -24,8 +24,12 @@ Chrome, or another browser's personal profile.
 
 The panel can change size or enter fullscreen without recreating Chromium.
 Heddlework publishes placement only when its measured rectangle changes. Hidden
-and inactive tabs keep their native browser but move to a 1×1 hidden placement,
-so navigation state survives tab switches without painting over GPUI controls.
+and inactive tabs keep their native browser with `visible={false}` and retain
+the last logical bounds (falling back to 1×1 only before the first show), so
+navigation state survives tab switches without painting over GPUI controls.
+Background tabs are not guaranteed job runners: Chromium may throttle timers
+and pause animation frames while hidden. Hide/show must restore identity,
+focus eligibility, and painting without a reload.
 
 ## Process model
 

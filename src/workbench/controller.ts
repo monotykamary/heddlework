@@ -66,6 +66,12 @@ const SESSION_PAGE_SIZE = 120
 const RECONNECT_BASE_DELAY_MS = 1_000
 const RECONNECT_MAX_DELAY_MS = 15_000
 const MAX_RECONNECT_ATTEMPTS = 10
+// Stream deltas (live assistant/tool text) are projection-only state, so they
+// apply at frame cadence: token-rate events collapse into one state update per
+// frame instead of one per token. Any other event flushes the queue first to
+// keep transcript ordering, and session transitions drop deltas that belong to
+// the previous live turn. The terminal service frames its output the same way.
+const STREAM_DELTA_FRAME_MS = 32
 const HISTORY_NAVIGATION_LOAD_OPTIONS = {
   minimumConversationMessages: SESSION_HISTORY_PAGE_CONVERSATION_MESSAGES,
   maximumMessages: SESSION_HISTORY_PAGE_MAX_MESSAGES,
@@ -86,6 +92,8 @@ export interface WorkbenchControllerDependencies {
   transportOwnership?: 'controller' | 'provider'
   queueStore?: QueueStoreService | undefined
   threadMetadataStore?: ThreadMetadataStoreService | undefined
+  /** Stream-delta frame cadence in milliseconds; tests may tighten it. */
+  streamDeltaFrameMs?: number | undefined
 }
 
 export class WorkbenchController {
@@ -97,7 +105,11 @@ export class WorkbenchController {
   readonly #dialogs: WorkbenchDialogCoordinator
   readonly #stopTransportOnDispose: boolean
   readonly #listeners = new Set<() => void>()
+  readonly #shellListeners = new Set<() => void>()
+  readonly #editorListeners = new Set<() => void>()
   #state: WorkbenchState
+  #shellSnapshot: WorkbenchState
+  #editorSnapshot: { editorText: string; editorImages: ComposerImage[] }
   #started = false
   #connecting = false
   #refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -116,6 +128,11 @@ export class WorkbenchController {
   readonly #fabricPeerRequests = new Map<string, (peers: FabricPeerCard[]) => void>()
   #compactionHold = false
   #pauseAfterTools = false
+  #runGeneration = 0
+  #refreshGeneration = 0
+  readonly #streamDeltas: RpcRecord[] = []
+  #streamDeltaTimer: ReturnType<typeof setTimeout> | undefined
+  readonly #streamDeltaFrameMs: number
   #unsubscribeEvent: () => void
   #unsubscribeStatus: () => void
 
@@ -126,6 +143,7 @@ export class WorkbenchController {
     this.#queueStore = dependencies.queueStore
     this.#threadMetadataStore = dependencies.threadMetadataStore
     this.#stopTransportOnDispose = dependencies.transportOwnership !== 'provider'
+    this.#streamDeltaFrameMs = dependencies.streamDeltaFrameMs ?? STREAM_DELTA_FRAME_MS
     this.#state = {
       ...createInitialState(workspacePath),
       queue: dependencies.queueStore?.load(workspacePath) ?? createQueueState(),
@@ -141,6 +159,8 @@ export class WorkbenchController {
     if (cachedSessions.length > 0) {
       this.#state = { ...this.#state, sessions: cachedSessions.slice(0, this.#sessionLimit), sessionsLoading: true, sessionsHasMore: cachedSessions.length > this.#sessionLimit }
     }
+    this.#shellSnapshot = this.#state
+    this.#editorSnapshot = { editorText: this.#state.editorText, editorImages: this.#state.editorImages }
     if (dependencies.transportEvents === 'external') {
       this.#unsubscribeEvent = () => undefined
       this.#unsubscribeStatus = () => undefined
@@ -155,7 +175,19 @@ export class WorkbenchController {
     return () => this.#listeners.delete(listener)
   }
 
+  readonly subscribeShell = (listener: () => void): (() => void) => {
+    this.#shellListeners.add(listener)
+    return () => this.#shellListeners.delete(listener)
+  }
+
+  readonly subscribeEditor = (listener: () => void): (() => void) => {
+    this.#editorListeners.add(listener)
+    return () => this.#editorListeners.delete(listener)
+  }
+
   readonly getSnapshot = (): WorkbenchState => this.#state
+  readonly getShellSnapshot = (): WorkbenchState => this.#shellSnapshot
+  readonly getEditorSnapshot = (): { editorText: string; editorImages: ComposerImage[] } => this.#editorSnapshot
 
   readonly loadEarlierMessages = async (): Promise<void> => {
     const pager = this.#historyPager
@@ -490,8 +522,10 @@ export class WorkbenchController {
   async newSession(): Promise<void> {
     if (this.#state.session.isStreaming) return
     this.#sessionTransitionDepth += 1
+    this.#refreshGeneration += 1
     try {
       this.#dialogs.cancelAll()
+      this.#discardStreamDeltas()
       const result = await this.#transport.request<{ cancelled?: boolean }>({ type: 'new_session' })
       if (result.cancelled) return
       this.#historyPager = undefined
@@ -518,37 +552,49 @@ export class WorkbenchController {
       this.#setState((state) => addNotice(state, 'error', errorMessage(error)))
     } finally {
       this.#sessionTransitionDepth = Math.max(0, this.#sessionTransitionDepth - 1)
+      this.#resumeQueueAfterTransition()
     }
   }
 
-  async switchWorkspace(workspacePath: string): Promise<void> {
+  async switchWorkspace(workspacePath: string, options: { confirmed?: boolean } = {}): Promise<void> {
     const target = resolve(workspacePath)
     if (target === resolve(this.#state.workspacePath)) return
     if (this.#state.connection !== 'connected') {
       this.#setState((state) => addNotice(state, 'warning', 'Reconnect Pi before switching sessions'))
       return
     }
-    this.#patch({ activity: 'Opening project' })
+    if (this.#state.session.isStreaming && !options.confirmed) {
+      this.#patch({ pendingNavigation: { kind: 'workspace', workspacePath: target, runGeneration: this.#runGeneration } })
+      return
+    }
+    this.#patch({ activity: 'Opening project', pendingNavigation: undefined })
     try {
       const session = await this.#sessionCatalog.createWorkspaceSession(target)
-      await this.switchSession(session)
+      await this.switchSession(session, options.confirmed ? { confirmed: true } : {})
     } catch (error) {
       this.#patch({ activity: 'Ready' })
       this.#setState((state) => addNotice(state, 'error', `Could not open project: ${errorMessage(error)}`))
     }
   }
 
-  async switchSession(session: PiSessionSummary): Promise<void> {
+  async switchSession(session: PiSessionSummary, options: { confirmed?: boolean } = {}): Promise<void> {
     if (isCurrentPiSession(session, this.#state.session)) return
     if (this.#state.connection !== 'connected') {
       this.#setState((state) => addNotice(state, 'warning', 'Reconnect Pi before switching sessions'))
       return
     }
     if (this.#sessionTransitionDepth > 0) return
+    if (this.#state.session.isStreaming && !options.confirmed) {
+      this.#patch({ pendingNavigation: { kind: 'session', session, runGeneration: this.#runGeneration } })
+      return
+    }
     this.#sessionTransitionDepth += 1
+    this.#refreshGeneration += 1
+    const refreshGeneration = this.#refreshGeneration
     try {
       this.#dialogs.cancelAll()
-      this.#patch({ activity: 'Opening thread' })
+      this.#discardStreamDeltas()
+      this.#patch({ activity: 'Opening thread', pendingNavigation: undefined })
       if (this.#state.session.isStreaming) {
         this.#pauseAfterTools = false
         try {
@@ -588,13 +634,33 @@ export class WorkbenchController {
         workspaceDiff: { status: 'idle', branch: '', files: [], additions: 0, deletions: 0 },
       })
       await this.#bootstrap(false)
+      if (this.#refreshGeneration !== refreshGeneration) return
+      if (options.confirmed) this.#setState((state) => addNotice(state, 'info', 'Stopped the previous run to open this thread'))
       void this.refreshSessions()
     } catch (error) {
       this.#patch({ activity: 'Ready' })
       this.#setState((state) => addNotice(state, 'error', errorMessage(error)))
     } finally {
       this.#sessionTransitionDepth = Math.max(0, this.#sessionTransitionDepth - 1)
+      this.#resumeQueueAfterTransition()
     }
+  }
+
+  async confirmPendingNavigation(): Promise<void> {
+    const pending = this.#state.pendingNavigation
+    if (!pending) return
+    if (pending.runGeneration !== this.#runGeneration) {
+      this.#patch({ pendingNavigation: undefined })
+      return
+    }
+    this.#patch({ pendingNavigation: undefined })
+    if (pending.kind === 'session') await this.switchSession(pending.session, { confirmed: true })
+    else await this.switchWorkspace(pending.workspacePath, { confirmed: true })
+  }
+
+  cancelPendingNavigation(): void {
+    if (!this.#state.pendingNavigation) return
+    this.#patch({ pendingNavigation: undefined })
   }
 
   async refreshSessions(): Promise<void> {
@@ -888,6 +954,7 @@ export class WorkbenchController {
 
   async dispose(): Promise<void> {
     this.#disposed = true
+    this.#flushStreamDeltas()
     this.#clearReconnectTimer()
     if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
     this.#dialogs.dispose()
@@ -897,6 +964,8 @@ export class WorkbenchController {
     this.#unsubscribeStatus()
     if (this.#stopTransportOnDispose) await this.#transport.stop()
     this.#listeners.clear()
+    this.#shellListeners.clear()
+    this.#editorListeners.clear()
   }
 
   async #sendPrompt(message: string, images: readonly ComposerImage[], restoreDraft: boolean): Promise<boolean> {
@@ -915,6 +984,7 @@ export class WorkbenchController {
       timestamp: Date.now(),
       workbenchOptimistic: true,
     }
+    this.#runGeneration += 1
     this.#patch({
       messages: [...previousMessages, optimistic],
       session: { ...previousSession, isStreaming: true },
@@ -1005,7 +1075,7 @@ export class WorkbenchController {
 
   async #drainQueueHead(): Promise<void> {
     const { queue, session, connection } = this.#state
-    if (queue.paused || queue.dispatchingId || session.isStreaming || connection !== 'connected' || this.#compactionHold) return
+    if (queue.paused || queue.dispatchingId || session.isStreaming || connection !== 'connected' || this.#compactionHold || this.#sessionTransitionDepth > 0) return
     const steerHead = queueLaneHead(queue.items, 'steer')
     const followUpHead = queueLaneHead(queue.items, 'followUp')
     const item = steerHead && !steerHead.paused ? steerHead : followUpHead && !followUpHead.paused ? followUpHead : undefined
@@ -1036,7 +1106,7 @@ export class WorkbenchController {
 
   #hasDispatchableIdleHead(): boolean {
     const { queue, connection } = this.#state
-    if (queue.paused || queue.dispatchingId || this.#state.session.isStreaming || connection !== 'connected' || this.#compactionHold) return false
+    if (queue.paused || queue.dispatchingId || this.#state.session.isStreaming || connection !== 'connected' || this.#compactionHold || this.#sessionTransitionDepth > 0) return false
     return [queueLaneHead(queue.items, 'steer'), queueLaneHead(queue.items, 'followUp')]
       .some((item) => item !== undefined && !item.paused)
   }
@@ -1210,6 +1280,7 @@ export class WorkbenchController {
             return true
           } finally {
             this.#sessionTransitionDepth = Math.max(0, this.#sessionTransitionDepth - 1)
+            this.#resumeQueueAfterTransition()
           }
         }
         case 'compact': {
@@ -1276,10 +1347,13 @@ export class WorkbenchController {
   }
 
   async #bootstrap(includeModels: boolean): Promise<void> {
+    const refreshGeneration = this.#refreshGeneration
+    const stale = () => this.#disposed || this.#refreshGeneration !== refreshGeneration
     const [session, sessionTree] = await Promise.all([
       this.#transport.request<PiSessionState>({ type: 'get_state' }),
       this.#tryRequestSessionTree(),
     ])
+    if (stale()) return
     this.#sessionTree = sessionTree
     this.#reconnectAttempts = 0
     this.#patch({
@@ -1301,6 +1375,7 @@ export class WorkbenchController {
       this.#transport.request<{ commands: RpcSlashCommand[] }>({ type: 'get_commands' }),
     ])
     const [messagesResult, modelsResult, levelsResult, statsResult, forkMessagesResult, commandsResult] = tasks
+    if (stale()) return
     this.#historyPager = messagesResult.status === 'fulfilled' ? messagesResult.value.pager : undefined
     this.#patch({
       messages: messagesResult.status === 'fulfilled' ? messagesResult.value.page.messages : this.#state.messages,
@@ -1313,7 +1388,16 @@ export class WorkbenchController {
       commands: commandsResult.status === 'fulfilled' ? slashCommandsFromRpc(commandsResult.value) : this.#state.commands,
     })
     void this.refreshWorkspaceDiff()
-    if (!session.isStreaming) queueMicrotask(() => this.#drainQueue())
+    if (!session.isStreaming) this.#resumeQueueAfterTransition()
+  }
+
+  // A transition blocks draining while it is in flight; once the outermost one
+  // finishes, queued input must get another chance instead of idling forever.
+  #resumeQueueAfterTransition(): void {
+    if (this.#sessionTransitionDepth > 0) return
+    queueMicrotask(() => {
+      if (this.#sessionTransitionDepth === 0 && !this.#state.session.isStreaming) this.#drainQueue()
+    })
   }
 
   async #loadInitialTranscript(session: PiSessionState, leafId?: string | null): Promise<{ page: SessionHistoryPage; pager: PiSessionHistoryPager | undefined }> {
@@ -1353,6 +1437,7 @@ export class WorkbenchController {
   }
 
   async #refreshMessages(): Promise<void> {
+    const refreshGeneration = this.#refreshGeneration
     try {
       const sessionFile = this.#state.session.sessionFile
       const previousTree = this.#sessionTree
@@ -1368,6 +1453,7 @@ export class WorkbenchController {
           && sessionTree !== undefined
           && !sessionTreeLeafDescendsFrom(sessionTree, previousTree.leafId)
         const retainedPager = branchChanged ? undefined : this.#historyPager
+        if (this.#disposed || this.#refreshGeneration !== refreshGeneration) return
         if (!retainedPager) this.#historyPager = latestPager
         this.#patch({
           messages: branchChanged ? page.messages : mergeTranscriptTail(this.#state.messages, page.messages),
@@ -1380,6 +1466,7 @@ export class WorkbenchController {
         return
       }
       const messages = await this.#transport.request<{ messages: PiMessage[] }>({ type: 'get_messages' })
+      if (this.#disposed || this.#refreshGeneration !== refreshGeneration) return
       this.#patch({ messages: messages.messages, messagesHasOlder: false, messagesLoadingEarlier: false, forkMessages: forkMessagesFrom(forkMessages), liveAssistant: undefined, liveTools: [] })
     } catch (error) {
       this.#setState((state) => addNotice(state, 'warning', `Could not refresh transcript: ${errorMessage(error)}`))
@@ -1503,15 +1590,26 @@ export class WorkbenchController {
   }
 
   #handleEvent(event: RpcRecord): void {
+    // An optimistically started run (sendPrompt) already owns its generation;
+    // only a run beginning outside that window advances it.
+    if (event.type === 'agent_start' && !this.#state.session.isStreaming) this.#runGeneration += 1
     const fabricEvent = parseFabricBridgeEvent(event)
     if (fabricEvent) {
+      this.#flushStreamDeltas()
       this.#handleFabricBridgeEvent(fabricEvent)
       return
     }
     if (isExtensionUiRequest(event)) {
+      this.#flushStreamDeltas()
       this.#dialogs.handleExtensionUi(event, this.#sessionTransitionDepth > 0)
       return
     }
+    if (isStreamDeltaEvent(event)) {
+      this.#streamDeltas.push(event)
+      this.#scheduleStreamDeltaFlush()
+      return
+    }
+    this.#flushStreamDeltas()
     this.#setState((state) => applyRpcEvent(state, event))
     if (event.type === 'compaction_start') this.#compactionHold = true
     if (event.type === 'compaction_end') {
@@ -1575,6 +1673,7 @@ export class WorkbenchController {
     if (status.state === 'stopped' && !this.#connecting) this.#patch({ connection: 'idle', connectionMessage: 'Disconnected' })
     if (status.state === 'exited') {
       this.#started = false
+      this.#discardStreamDeltas()
       this.#patch({
         connection: 'error',
         connectionMessage: status.message,
@@ -1582,6 +1681,34 @@ export class WorkbenchController {
         activity: 'Disconnected',
       })
       if (!this.#connecting) this.#scheduleReconnect()
+    }
+  }
+
+  #scheduleStreamDeltaFlush(): void {
+    if (this.#streamDeltaTimer) return
+    const timer = setTimeout(() => {
+      this.#streamDeltaTimer = undefined
+      this.#flushStreamDeltas()
+    }, this.#streamDeltaFrameMs)
+    timer.unref?.()
+    this.#streamDeltaTimer = timer
+  }
+
+  #flushStreamDeltas(): void {
+    if (this.#streamDeltaTimer) {
+      clearTimeout(this.#streamDeltaTimer)
+      this.#streamDeltaTimer = undefined
+    }
+    if (this.#streamDeltas.length === 0) return
+    const events = this.#streamDeltas.splice(0)
+    this.#setState((state) => events.reduce((accumulated, event) => applyRpcEvent(accumulated, event), state))
+  }
+
+  #discardStreamDeltas(): void {
+    this.#streamDeltas.splice(0)
+    if (this.#streamDeltaTimer) {
+      clearTimeout(this.#streamDeltaTimer)
+      this.#streamDeltaTimer = undefined
     }
   }
 
@@ -1596,8 +1723,26 @@ export class WorkbenchController {
     this.#state = next
     if (next.queue !== previous.queue || next.workspacePath !== previous.workspacePath) this.#queueStore?.save(next.workspacePath, next.queue)
     if (next.threadLifecycle !== previous.threadLifecycle) this.#threadMetadataStore?.save(next.threadLifecycle)
+    const editorChanged = next.editorText !== previous.editorText || next.editorImages !== previous.editorImages
+    const shellChanged = workbenchShellChanged(previous, next)
+    if (shellChanged) this.#shellSnapshot = next
+    if (editorChanged) this.#editorSnapshot = { editorText: next.editorText, editorImages: next.editorImages }
     for (const listener of this.#listeners) listener()
+    if (shellChanged) for (const listener of this.#shellListeners) listener()
+    if (editorChanged) for (const listener of this.#editorListeners) listener()
   }
+}
+
+function workbenchShellChanged(previous: WorkbenchState, next: WorkbenchState): boolean {
+  for (const key of Object.keys(next) as Array<keyof WorkbenchState>) {
+    if (key === 'editorText' || key === 'editorImages') continue
+    if (previous[key] !== next[key]) return true
+  }
+  return false
+}
+
+function isStreamDeltaEvent(event: RpcRecord): boolean {
+  return event.type === 'message_update' || event.type === 'tool_execution_update'
 }
 
 function resolveModelReference(models: readonly PiModel[], reference: string): { provider: string; modelId: string } | undefined {

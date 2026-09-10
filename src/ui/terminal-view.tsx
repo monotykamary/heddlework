@@ -34,7 +34,7 @@ export const TerminalView = memo(function TerminalView({
   focusSerial?: number
 }) {
   const projectionSuspensionRequested = useTerminalProjectionSuspended()
-  const projectionSuspended = placement === 'right' && projectionSuspensionRequested
+  const projectionSuspended = projectionSuspensionRequested
   const gpuix = useGpuix()
   const renderer = gpuix?.renderer as TerminalCapableRenderer | undefined
   const nativeTerminal = renderer?.supportsNativeTerminal?.() === true

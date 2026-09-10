@@ -16,6 +16,7 @@ import { SurfacePickerPanel } from './surface-picker.tsx'
 import { Transcript } from './transcript.tsx'
 import type { WorkbenchUiRegistry } from './extensions.ts'
 import type { ToolPresenter } from './tool-presenters.ts'
+import { Button } from './primitives.tsx'
 import { Icon } from './icons.tsx'
 import { colors } from './theme.ts'
 import { defaultThemeManager, type ThemeManager } from './theme-manager.ts'
@@ -61,7 +62,7 @@ export function WorkbenchApp({
   pickDirectory?: typeof pickWorkspaceDirectory
   onQuit?(): void
 }) {
-  const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
+  const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot)
   const theme = useSyncExternalStore(themeManager.subscribe, themeManager.getSnapshot)
   const uiSnapshot = useSyncExternalStore(ui.subscribe, ui.getSnapshot)
   const renderer = useGpuixRequired()
@@ -255,8 +256,9 @@ export function WorkbenchApp({
     setPanelFullscreen(!panelFullscreen)
   }
 
+  const chatHidden = surface !== 'chat'
   const rightPanelOpen = Boolean(rightPanel)
-  const bottomFullscreenVisible = bottomTerminalFullscreen && bottomTerminalOpen
+  const bottomFullscreenVisible = bottomTerminalFullscreen && bottomTerminalOpen && !chatHidden
   const panelFullscreenTarget = forcedPanelFullscreen || panelFullscreen
   const panelFullscreenVisible = panelFullscreenTarget || panelFullscreenRendered
   const fullscreenVisible = panelFullscreenVisible || bottomFullscreenVisible
@@ -345,12 +347,10 @@ export function WorkbenchApp({
           style={{ position: 'absolute', top: windowInsets.effective.top, right: windowInsets.effective.right, bottom: windowInsets.effective.bottom, left: windowInsets.effective.left, display: 'flex', flexDirection: 'row', backgroundColor: colors.background, overflow: 'hidden' }}
         >
           {!layout.navigationOverlay && sidebarHost}
-          {surface === 'flows' && flows ? (
-            <FlowsView state={state} controller={controller} runtime={flows} presenters={presenters} titlebarInset={flowsTitlebarInset} onClose={closeFlows} onOpenSession={openFlowSession} />
-          ) : surface === 'settings' ? (
-            <SettingsView state={state} controller={controller} theme={theme} titlebarInset={settingsTitlebarInset} onThemeModeChange={(mode) => themeManager.setMode(mode)} terminals={terminals} browsers={browsers} onClose={() => setSurface('chat')} />
-          ) : (
-            <div testId="workbench-main" style={{ position: 'relative', display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, height: '100%', backgroundColor: colors.background, overflow: 'hidden' }}>
+          <div testId="workbench-content-host" style={{ position: 'relative', display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, height: '100%', overflow: 'hidden' }}>
+          <div testId="workbench-main" style={chatHidden
+            ? { position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none', opacity: 0 }
+            : { position: 'relative', display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, height: '100%', backgroundColor: colors.background, overflow: 'hidden' }}>
               <MotionDiv initial={false} animate={{ flexGrow: conversationFlexGrow }} transition={LAYOUT_MOTION_TRANSITION} style={{ display: 'flex', flexDirection: 'column', width: 0, flexGrow: conversationFlexGrow, minWidth: 0, height: '100%', overflow: 'hidden' }}>
                 <MotionDiv initial={false} animate={{ height: chatHeaderHeight }} transition={LAYOUT_MOTION_TRANSITION} style={{ height: chatHeaderHeight, flexShrink: 0, overflow: 'hidden' }}>
                   <ChatHeader state={state} controller={controller} diffOpen={diffOpen} terminalOpen={bottomTerminalOpen} leftSidebarProgress={layout.navigationOverlay ? 0 : animatedSidebarProgress} onToggleDiff={toggleDiff} {...(terminals ? { onToggleTerminal: toggleBottomTerminal } : {})} />
@@ -360,7 +360,7 @@ export function WorkbenchApp({
                     <DraftWorkspaceChooser pickDirectory={pickDirectory} state={state} controller={controller} />
                   ) : (
                     <>
-                      <Transcript state={state} presenters={presenters} appearance={theme.resolved} interactionDisabled={composerPickerOpen} onOpenDiff={() => openDiff()} onRevert={(entryId) => void controller.navigateTree(entryId)} onDismissNotice={(id) => controller.dismissNotice(id)} onLoadEarlier={controller.loadEarlierMessages} />
+                      <Transcript state={state} presenters={presenters} appearance={theme.resolved} interactionDisabled={composerPickerOpen || chatHidden} suspended={chatHidden} onOpenDiff={() => openDiff()} onRevert={(entryId) => void controller.navigateTree(entryId)} onDismissNotice={(id) => controller.dismissNotice(id)} onLoadEarlier={controller.loadEarlierMessages} />
                       <TranscriptFade />
                       <Composer state={state} controller={controller} onPickerOpenChange={setComposerPickerOpen} />
                     </>
@@ -368,6 +368,7 @@ export function WorkbenchApp({
                   <ConversationExtensionOverlay state={state} controller={controller} />
                 </MotionDiv>
                 {showBottomDock && terminals && (
+                  <TerminalProjectionSuspensionProvider suspended={chatHidden}>
                   <TerminalDock
                     service={terminals}
                     open={bottomTerminalOpen}
@@ -380,6 +381,7 @@ export function WorkbenchApp({
                     onToggleFullscreen={() => setBottomTerminalFullscreen((value) => !value)}
                     onClose={closeBottomTerminal}
                   />
+                  </TerminalProjectionSuspensionProvider>
                 )}
               </MotionDiv>
               {panel && (
@@ -399,14 +401,19 @@ export function WorkbenchApp({
                     ? { position: 'absolute', top: 0, right: 0, bottom: 0, width: safeWidth }
                     : { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 }}
                   >
-                    <TerminalProjectionSuspensionProvider suspended={rightTerminalSuspended}>
+                    <TerminalProjectionSuspensionProvider suspended={rightTerminalSuspended || chatHidden}>
                       {panel}
                     </TerminalProjectionSuspensionProvider>
                   </div>
                 </MotionDiv>
               )}
             </div>
-          )}
+          {surface === 'flows' && flows ? (
+            <FlowsView state={state} controller={controller} runtime={flows} presenters={presenters} titlebarInset={flowsTitlebarInset} onClose={closeFlows} onOpenSession={openFlowSession} />
+          ) : surface === 'settings' ? (
+            <SettingsView state={state} controller={controller} theme={theme} titlebarInset={settingsTitlebarInset} onThemeModeChange={(mode) => themeManager.setMode(mode)} terminals={terminals} browsers={browsers} onClose={() => setSurface('chat')} />
+          ) : null}
+          </div>
           {layout.navigationOverlay && !panel && (leftSidebarOpen || leftSidebarMounted) && (
             <>
               <MotionDiv
@@ -432,6 +439,18 @@ export function WorkbenchApp({
             />
           )}
           {browsers && <BrowserNativeHost service={browsers} suspended={Boolean(bottomResizeDrag)} />}
+          {state.pendingNavigation && (
+            <div testId="session-switch-confirm" style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#00000088', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto' }}>
+              <div style={{ width: 420, maxWidth: '92%', padding: 18, borderRadius: 12, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.border, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <text style={{ color: colors.text, fontSize: 15, fontWeight: 600 }}>Stop the current run and open this thread?</text>
+                <text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>This window currently runs one Pi session at a time. Switching interrupts the current run.</text>
+                <div style={{ display: 'flex', flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+                  <Button label="Stay here" tone="quiet" onClick={() => controller.cancelPendingNavigation()} />
+                  <Button label="Stop and switch" tone="primary" onClick={() => void controller.confirmPendingNavigation()} />
+                </div>
+              </div>
+            </div>
+          )}
           {!fullscreenVisible && (
             <MotionDiv
               initial={false}

@@ -127,7 +127,7 @@ describe('clickable session switching', () => {
     }
   })
 
-  it('aborts an in-flight turn before switching threads', async () => {
+  it('asks before aborting an in-flight turn, and cancel leaves the run untouched', async () => {
     const transport = new SwitchingTransport()
     const controller = new WorkbenchController(transport, '/tmp/project', testControllerDependencies(new StaticCatalog()))
     try {
@@ -136,11 +136,73 @@ describe('clickable session switching', () => {
       expect(controller.getSnapshot().session.isStreaming).toBe(true)
       const before = transport.requests.length
       await controller.switchSession(sessions[1]!)
+      expect(transport.requests.slice(before)).toEqual([])
+      expect(controller.getSnapshot().pendingNavigation).toMatchObject({ kind: 'session', runGeneration: 1 })
+      expect(controller.getSnapshot().session.sessionId).toBe('one')
+      controller.cancelPendingNavigation()
+      expect(controller.getSnapshot().pendingNavigation).toBeUndefined()
+      expect(controller.getSnapshot().session.isStreaming).toBe(true)
+      expect(transport.requests.slice(before)).toEqual([])
+    } finally {
+      await controller.dispose()
+    }
+  })
+
+  it('aborts an in-flight turn only after confirmed interruption', async () => {
+    const transport = new SwitchingTransport()
+    const controller = new WorkbenchController(transport, '/tmp/project', testControllerDependencies(new StaticCatalog()))
+    try {
+      await controller.start()
+      transport.emitEvent({ type: 'agent_start' })
+      const before = transport.requests.length
+      await controller.switchSession(sessions[1]!)
+      await controller.confirmPendingNavigation()
       const issued = transport.requests.slice(before)
       expect(issued[0]).toEqual({ type: 'abort' })
       expect(issued[1]).toEqual({ type: 'switch_session', sessionPath: '/tmp/two.jsonl' })
       expect(controller.getSnapshot().session.sessionId).toBe('two')
       expect(controller.getSnapshot().session.isStreaming).toBe(false)
+      expect(controller.getSnapshot().notices.some((notice) => notice.message.includes('Stopped the previous run'))).toBe(true)
+    } finally {
+      await controller.dispose()
+    }
+  })
+
+  it('honors a confirmation requested during the optimistic send window', async () => {
+    const transport = new SwitchingTransport()
+    const controller = new WorkbenchController(transport, '/tmp/project', testControllerDependencies(new StaticCatalog()))
+    try {
+      await controller.start()
+      await controller.submit('Inspect the runtime')
+      expect(controller.getSnapshot().session.isStreaming).toBe(true)
+      const before = transport.requests.length
+      await controller.switchSession(sessions[1]!)
+      expect(controller.getSnapshot().pendingNavigation).toBeDefined()
+      transport.emitEvent({ type: 'agent_start' })
+      await controller.confirmPendingNavigation()
+      const issued = transport.requests.slice(before)
+      expect(issued[0]).toEqual({ type: 'abort' })
+      expect(issued[1]).toEqual({ type: 'switch_session', sessionPath: '/tmp/two.jsonl' })
+      expect(controller.getSnapshot().session.sessionId).toBe('two')
+    } finally {
+      await controller.dispose()
+    }
+  })
+
+  it('ignores a stale interruption confirmation after a new run starts', async () => {
+    const transport = new SwitchingTransport()
+    const controller = new WorkbenchController(transport, '/tmp/project', testControllerDependencies(new StaticCatalog()))
+    try {
+      await controller.start()
+      transport.emitEvent({ type: 'agent_start' })
+      await controller.switchSession(sessions[1]!)
+      transport.emitEvent({ type: 'agent_settled' })
+      transport.emitEvent({ type: 'agent_start' })
+      const before = transport.requests.length
+      await controller.confirmPendingNavigation()
+      expect(transport.requests.slice(before)).toEqual([])
+      expect(controller.getSnapshot().pendingNavigation).toBeUndefined()
+      expect(controller.getSnapshot().session.sessionId).toBe('one')
     } finally {
       await controller.dispose()
     }

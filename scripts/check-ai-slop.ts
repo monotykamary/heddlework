@@ -66,11 +66,12 @@ function addedLinesOf(diff: string): Map<string, string> {
   return out;
 }
 
-function treeFiles(): string[] {
+function treeFiles(): { files: string[]; untracked: Set<string> } {
   // tracked + untracked-but-not-ignored source; skip vendor/build pulls and the .pi state dir
   const tracked = git(["ls-files"]).split("\n").filter(Boolean);
   const untracked = git(["ls-files", "--others", "--exclude-standard"]).split("\n").filter(Boolean);
-  return [...tracked, ...untracked].filter((p) => !p.startsWith("external/") && !p.startsWith("node_modules/"));
+  const files = [...tracked, ...untracked].filter((p) => !p.startsWith("external/") && !p.startsWith("node_modules/"));
+  return { files, untracked: new Set(untracked) };
 }
 
 const findings: Array<{ severity: string; file: string; detail: string }> = [];
@@ -97,9 +98,20 @@ for (const [file, addedSrc] of addedLinesOf(diffText())) {
   }
 }
 if (scope === "worktree") {
-  for (const file of treeFiles()) {
+  const { files, untracked } = treeFiles();
+  for (const file of files) {
     if (file === SELF_PATH) continue;
-    const src = readFileSync(file, "utf8");
+    let src: string;
+    try {
+      src = readFileSync(file, "utf8");
+    } catch (error) {
+      // Unreadable untracked artifacts (e.g. mode-000 build-cache leftovers from
+      // an interrupted build) cannot be committed source; skip them. A tracked
+      // source file that cannot be read is a real problem: fail loudly instead
+      // of silently omitting it from the merge-marker scan.
+      if (!untracked.has(file)) throw error;
+      continue;
+    }
     if (src.includes(CM_OPEN) || src.includes(CM_CLOSE)) {
       findings.push({ severity: ERROR, file, detail: "unresolved merge conflict marker in tree" });
     }

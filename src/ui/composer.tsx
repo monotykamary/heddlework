@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { ComposerImage, PiModel, PiSessionStats, SlashCommand, ThinkingLevel } from '../pi/types.ts'
 import type { WorkbenchController } from '../workbench/controller.ts'
@@ -36,7 +36,8 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
   const hintShownOnce = useRef(false)
   const commandPickedByKeyDown = useRef(false)
   const suppressComposerChange = useRef(false)
-  const commandQuery = composerCommandQuery(state.editorText)
+  const editor = useSyncExternalStore(controller.subscribeEditor, controller.getEditorSnapshot)
+  const commandQuery = composerCommandQuery(editor.editorText)
   const [slashDismissed, setSlashDismissed] = useState(false)
   const matchingCommands = useMemo(() => (
     slashDismissed || commandQuery === undefined ? [] : matchCommands(state.commands, commandQuery).slice(0, 8)
@@ -50,7 +51,7 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
   useEffect(() => setActiveCommandIndex(0), [commandQuery])
   useEffect(() => {
     if (slashDismissed) setSlashDismissed(false)
-  }, [slashDismissed, state.editorText])
+  }, [slashDismissed, editor.editorText])
   useEffect(() => {
     const request = state.uiRequest
     if (request?.kind === 'model' || request?.kind === 'thinking') controller.completeUiRequest(request.id)
@@ -88,7 +89,7 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
   const above = Object.values(state.widgets).filter((widget) => widget.placement === 'aboveEditor')
   const below = Object.values(state.widgets).filter((widget) => widget.placement === 'belowEditor')
   const contextPercent = state.stats?.contextUsage?.percent
-  const hasComposerInput = Boolean(state.editorText.trim() || state.editorImages.length > 0)
+  const hasComposerInput = Boolean(editor.editorText.trim() || editor.editorImages.length > 0)
   const canResumeQueue = !state.session.isStreaming && state.queue.paused && state.queue.items.length > 0 && !hasComposerInput
   const queueHintOpen = queueHintVisible && connected && !state.session.isStreaming
   const primaryActionWidth = queueHintOpen ? queueHintExpandedWidth() : PRIMARY_ACTION_SIZE
@@ -101,7 +102,7 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
 
   const send = (value: string, queue = false) => {
     clearQueueHint()
-    if (!value.trim() && state.editorImages.length === 0) {
+    if (!value.trim() && editor.editorImages.length === 0) {
       if (!queue && state.queue.paused && state.queue.items.length > 0) controller.resumeQueue()
       return
     }
@@ -179,10 +180,10 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
       completeActiveSlashCommand()
       keepComposerFocus()
     }
-    if (key === 'v' && (event.modifiers?.cmd || event.modifiers?.ctrl)) void pasteClipboardImage(state.editorText)
+    if (key === 'v' && (event.modifiers?.cmd || event.modifiers?.ctrl)) void pasteClipboardImage(editor.editorText)
     if (key === 'enter' && event.modifiers?.alt) {
       queuedByKeyDown.current = true
-      send(state.editorText, true)
+      send(editor.editorText, true)
       queueMicrotask(() => { queuedByKeyDown.current = false })
     }
   }
@@ -229,13 +230,13 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
           }}
         >
         <div style={{ position: 'absolute', left: 1, right: 1, top: 1, bottom: 1, borderWidth: 1, borderColor: colors.composerHighlight, borderRadius: 21, pointerEvents: 'none' }} />
-        {state.editorImages.length > 0 && <ComposerImages images={state.editorImages} onRemove={(id) => controller.removeEditorImage(id)} />}
+        {editor.editorImages.length > 0 && <ComposerImages images={editor.editorImages} onRemove={(id) => controller.removeEditorImage(id)} />}
         {pastingImage && <text style={{ color: colors.textFaint, fontSize: 10, paddingLeft: 16, paddingBottom: 6 }}>Reading image from clipboard…</text>}
         <textarea
           ref={setComposerNode}
           testId="composer"
           tabIndex={0}
-          value={state.editorText}
+          value={editor.editorText}
           placeholder={connected ? (draft ? (layout.mobile ? 'Ask anything, @tag files, or / for commands' : 'Ask anything, @tag files/folders, $use skills, or / for commands') : 'Ask for follow-up changes or attach images') : 'Reconnect to Pi to begin'}
           minRows={3}
           maxRows={7}
@@ -272,7 +273,7 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
               queuedByKeyDown.current = false
               return
             }
-            send(String(event.value ?? state.editorText), Boolean(event.modifiers?.alt))
+            send(String(event.value ?? editor.editorText), Boolean(event.modifiers?.alt))
           }}
         />
         {matchingCommands.length > 0 && commandQuery ? (
@@ -327,7 +328,7 @@ export function Composer({ state, controller, draft = false, onPickerOpenChange 
               tabIndex={matchingCommands.length > 0 ? -1 : 0}
               queueHintVisible={queueHintOpen}
               width={primaryActionWidth}
-              onSend={() => send(state.editorText)}
+              onSend={() => send(editor.editorText)}
               onStop={() => void controller.abort()}
             />
           </div>

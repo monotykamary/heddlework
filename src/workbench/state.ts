@@ -122,7 +122,12 @@ export interface WorkbenchState {
   editorText: string
   editorImages: ComposerImage[]
   windowTitle: string
+  pendingNavigation: PendingNavigation | undefined
 }
+
+export type PendingNavigation =
+  | { kind: 'session'; session: PiSessionSummary; runGeneration: number }
+  | { kind: 'workspace'; workspacePath: string; runGeneration: number }
 
 let noticeId = 0
 
@@ -160,6 +165,7 @@ export function createInitialState(workspacePath: string): WorkbenchState {
     editorText: '',
     editorImages: [],
     windowTitle: 'Heddlework',
+    pendingNavigation: undefined,
   }
 }
 
