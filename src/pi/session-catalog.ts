@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { basename, dirname, join, resolve } from 'node:path'
 import { asRecord, contentText } from '../workbench/state.ts'
+import { watchPiSessions } from './session-watch.ts'
 
 export interface PiSessionSummary {
   id: string
@@ -21,12 +22,17 @@ export interface PiSessionSummary {
   lastAssistantStopReason?: string | undefined
 }
 
+export interface SessionCatalogDiagnostics {
+  scanStarted?(scope: string): void
+}
+
 export interface SessionCatalogOptions {
   agentDir?: string
   limit?: number
   scope?: 'all' | 'cwd'
   concurrency?: number
   cachePath?: string | false
+  diagnostics?: SessionCatalogDiagnostics
 }
 
 interface SessionFileMeta {
@@ -64,7 +70,10 @@ const SESSION_META_CONCURRENCY = 64
 
 export class PiSessionCatalog {
   readonly #options: SessionCatalogOptions
-  readonly #cache = new Map<string, SessionCacheEntry>()
+  readonly #caches = new Map<string, Map<string, SessionCacheEntry>>()
+  readonly #scans = new Map<string, Promise<PiSessionSummary[]>>()
+  readonly #watches = new Map<string, { listeners: Set<() => void>; close: () => void }>()
+  #persistQueue: Promise<void> = Promise.resolve()
   #persisted: PiSessionSummary[]
 
   constructor(options: SessionCatalogOptions = {}) {
@@ -80,11 +89,76 @@ export class PiSessionCatalog {
   }
 
   async list(cwd: string, limit = this.#options.limit): Promise<PiSessionSummary[]> {
-    const options = limit === undefined ? this.#options : { ...this.#options, limit }
-    const sessions = await listPiSessionsCached(cwd, options, this.#cache)
-    this.#persisted = sessions
-    await persistSessions(this.#options.cachePath, sessions)
-    return sessions
+    const scoped = (this.#options.scope ?? 'all') === 'cwd'
+    const key = scoped ? resolve(cwd) : '*'
+    let scan = this.#scans.get(key)
+    if (!scan) {
+      let cache = this.#caches.get(key)
+      if (!cache) {
+        cache = new Map()
+        this.#caches.set(key, cache)
+      }
+      const { limit: _limit, diagnostics: _diagnostics, ...options } = this.#options
+      this.#options.diagnostics?.scanStarted?.(key)
+      scan = listPiSessionsCached(cwd, options, cache).then(async (sessions) => {
+        const previousByPath = new Map(this.#persisted.map((session) => [session.path, session]))
+        const stableScope = sessions.map((session) => {
+          const previous = previousByPath.get(session.path)
+          return previous && sameSummary(previous, session) ? previous : session
+        })
+        const scannedPaths = new Set(stableScope.map((session) => session.path))
+        const nextPersisted = scoped
+          ? [
+              ...this.#persisted.filter((session) => (
+                resolve(session.cwd) !== key && !scannedPaths.has(session.path)
+              )),
+              ...stableScope,
+            ].sort((left, right) => right.modifiedAt - left.modifiedAt)
+          : stableScope
+        const changed = !sameSummaryList(this.#persisted, nextPersisted)
+        if (changed) {
+          this.#persisted = nextPersisted
+          const snapshot = nextPersisted
+          this.#persistQueue = this.#persistQueue.then(() => persistSessions(this.#options.cachePath, snapshot))
+          await this.#persistQueue
+        }
+        return stableScope
+      }).finally(() => {
+        if (this.#scans.get(key) === scan) this.#scans.delete(key)
+      })
+      this.#scans.set(key, scan)
+    }
+    const sessions = await scan
+    return limit === undefined ? sessions : sessions.slice(0, Math.max(0, limit))
+  }
+
+  subscribe(cwd: string, listener: () => void): () => void {
+    const scoped = (this.#options.scope ?? 'all') === 'cwd'
+    const root = scoped
+      ? getPiSessionDirectory(cwd, this.#options.agentDir)
+      : getPiSessionRoot(this.#options.agentDir)
+    let entry = this.#watches.get(root)
+    if (!entry) {
+      const listeners = new Set<() => void>()
+      entry = {
+        listeners,
+        close: watchPiSessions(root, () => {
+          for (const callback of listeners) callback()
+        }, { recursive: !scoped }),
+      }
+      this.#watches.set(root, entry)
+    }
+    entry.listeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      entry!.listeners.delete(listener)
+      if (entry!.listeners.size === 0 && this.#watches.get(root) === entry) {
+        entry!.close()
+        this.#watches.delete(root)
+      }
+    }
   }
 
   async createWorkspaceSession(cwd: string): Promise<PiSessionSummary> {
@@ -97,6 +171,15 @@ export class PiSessionCatalog {
     await writeFile(path, `${JSON.stringify({ type: 'session', version: 3, id, timestamp, cwd: workspace })}\n`, { encoding: 'utf8', flag: 'wx' })
     return { id, path, cwd: workspace, title: '(no messages)', firstMessage: '', messageCount: 0, createdAt: Date.parse(timestamp), modifiedAt: Date.parse(timestamp) }
   }
+}
+
+function sameSummary(left: PiSessionSummary, right: PiSessionSummary): boolean {
+  const keys = Object.keys(left) as (keyof PiSessionSummary)[]
+  return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key])
+}
+
+function sameSummaryList(left: readonly PiSessionSummary[], right: readonly PiSessionSummary[]): boolean {
+  return left.length === right.length && left.every((session, index) => session === right[index])
 }
 
 export function listPiSessions(cwd: string, options: SessionCatalogOptions = {}): Promise<PiSessionSummary[]> {

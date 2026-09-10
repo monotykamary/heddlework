@@ -1,5 +1,14 @@
 # Third-Party Notices
 
+## Community Heddlework fork
+
+Browser placement backoff (`src/ui/browser-placement.ts` and its tests) is ported from
+[0xCUB3/heddlework](https://github.com/0xCUB3/heddlework), commit
+`0ee57ea1a30d151b42e2124b2bad1ebcbdb55d61`. Browser-aware native chrome detection
+is adapted from that fork’s `src/ui/window-chrome.ts` at `d55e9ad`.
+These contributions are distributed under the MIT license reproduced in this
+repository’s `LICENSE` (Copyright (c) 2026 Tom Nguyen).
+
 ## T3 Code
 
 Heddlework's desktop layout and interaction design are adapted from [T3 Code](https://github.com/pingdotgg/t3code).

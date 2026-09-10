@@ -1,3 +1,4 @@
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React, { useCallback, useEffect, useState } from 'react'
 import type { TerminalSessionService } from '../terminal/service.ts'
 import { IconButton } from './primitives.tsx'
@@ -53,7 +54,7 @@ export function TerminalDock({
   }, [requestFocus, service])
 
   const viewHeight = Math.max(1, height - TERMINAL_DOCK_HEADER)
-  const trafficLightInset = process.platform === 'darwin' ? 96 * fullscreenProgress : 0
+  const trafficLightInset = hasNativeTrafficLights() ? 96 * fullscreenProgress : 0
 
   return (
     <MotionDiv initial={{ height: 0 }} animate={{ height }} transition={LAYOUT_MOTION_TRANSITION} testId="terminal-dock" style={{ height, flexShrink: 0, display: 'flex', flexDirection: 'column', borderTopWidth: fullscreenProgress > 0.5 ? 0 : 1, borderColor: colors.border, backgroundColor: colors.panel, overflow: 'hidden' }}>

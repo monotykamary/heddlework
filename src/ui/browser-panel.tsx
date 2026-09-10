@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useGpuixRequired, useWindowSize } from '@gpuix/react'
 import type { BrowserSessionService } from '../browser/service.ts'
-import type { BrowserProfile, BrowserSurfaceBounds, BrowserTab } from '../browser/types.ts'
+import type { BrowserProfile, BrowserTab } from '../browser/types.ts'
 import { browserDisplayAddress } from '../browser/url.ts'
 import type { WorkbenchSurfaceProps } from './extensions.ts'
 import { Icon } from './icons.tsx'
@@ -10,6 +10,7 @@ import { RightPanelHeader, rightPanelStyle } from './right-panel-header.tsx'
 import { colors } from './theme.ts'
 import { useBrowserSnapshot } from './browser-context.tsx'
 import { openExternal } from './open-external.ts'
+import { sampleBrowserPlacement, type BrowserPlacementSample } from './browser-placement.ts'
 
 interface BoundsRenderer {
   getElementBounds?(id: number): readonly number[] | undefined
@@ -43,6 +44,7 @@ export function BrowserPanel({
       <RightPanelHeader
         icon="globe"
         title="Browser"
+        compact
         fullscreen={fullscreen}
         fullscreenProgress={fullscreenProgress}
         fullscreenLocked={fullscreenLocked}
@@ -115,7 +117,7 @@ function BrowserToolbar({
   }
 
   return (
-    <div testId="browser-toolbar" style={{ height: 42, flexShrink: 0, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 3, paddingLeft: 7, paddingRight: 7, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.panel }}>
+    <div testId="browser-toolbar" style={{ height: 38, flexShrink: 0, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 3, paddingLeft: 7, paddingRight: 7, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.panel }}>
       <IconButton icon="chevronLeft" label="Back" testId="browser-back" disabled={!tab?.canGoBack} onClick={() => tab && service.command(tab.id, 'back')} />
       <IconButton icon="chevronRight" label="Forward" testId="browser-forward" disabled={!tab?.canGoForward} onClick={() => tab && service.command(tab.id, 'forward')} />
       <IconButton icon={tab?.status === 'loading' ? 'x' : 'refresh'} label={tab?.status === 'loading' ? 'Stop loading' : 'Reload'} testId="browser-reload" disabled={!tab?.url} onClick={() => tab && service.command(tab.id, tab.status === 'loading' ? 'stop' : 'reload')} />
@@ -150,17 +152,19 @@ function BrowserSurfaceSlot({ service, tabId, visible }: { service: BrowserSessi
   }, [])
 
   useEffect(() => {
+    let previous: BrowserPlacementSample | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     const update = () => {
       const id = elementId.current
       const raw = id === undefined ? undefined : renderer.getElementBounds?.(id)
-      if (!raw || raw.length < 4) return
-      const bounds: BrowserSurfaceBounds = { x: raw[0] ?? 0, y: raw[1] ?? 0, width: raw[2] ?? 1, height: raw[3] ?? 1 }
-      service.setPlacement(tabId, bounds, visible)
+      const result = sampleBrowserPlacement(raw, visible, previous)
+      previous = result.sample
+      if (result.changed && result.sample) service.setPlacement(tabId, result.sample.bounds, result.sample.visible)
+      timer = setTimeout(update, result.nextDelayMs)
     }
     update()
-    const timer = setInterval(update, 16)
     return () => {
-      clearInterval(timer)
+      if (timer !== undefined) clearTimeout(timer)
       service.hidePlacement(tabId)
     }
   }, [renderer, service, tabId, visible])

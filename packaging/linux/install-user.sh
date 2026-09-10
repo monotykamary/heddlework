@@ -78,6 +78,11 @@ esac
 
 install -d "$app_dir" "$bin_dir" "$applications_dir" "$icons_dir"
 install -m 755 "$source_binary" "$installed_binary"
+source_web=$(dirname -- "$source_binary")/web
+if [ -d "$source_web" ]; then
+  install -d "$app_dir/web"
+  cp -R "$source_web/." "$app_dir/web/"
+fi
 install -m 644 "$repo_root/media/heddlework-icon.svg" "$icon"
 
 umask 077

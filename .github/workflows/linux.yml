@@ -1,0 +1,62 @@
+name: linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compositor-smoke:
+    name: ${{ matrix.compositor }} / ${{ matrix.decorations }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        compositor: [mutter-wayland, sway-wayland, mutter-x11]
+        decorations: [client, server]
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      HEDDLEWORK_KEEP_BUILD_CACHE: '0'
+      HEDDLEWORK_SMOKE_ARTIFACTS: /tmp/heddlework-linux-smoke-results
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install GPUI and compositor dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang dbus-x11 fonts-dejavu-core jq \
+            libfontconfig-dev libgl1-mesa-dri libssl-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev \
+            mesa-vulkan-drivers mutter pkg-config sway vulkan-tools wayland-protocols \
+            weston x11-utils xdotool xvfb
+      - run: bun install --frozen-lockfile
+      - name: Build pinned Heddlework GPUix runtime
+        run: bun scripts/install-gpuix.ts
+      - name: Run real compositor smoke
+        run: |
+          native_addon=$(find node_modules/.cache/heddlework-gpuix -type f -name 'gpuix-native.linux-x64-gnu.node' -print -quit)
+          test -n "$native_addon"
+          NAPI_RS_NATIVE_LIBRARY_PATH="$native_addon" \
+            ./scripts/linux-compositor-smoke.sh "${{ matrix.compositor }}" "${{ matrix.decorations }}"
+      - name: Upload compositor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.compositor }}-${{ matrix.decorations }}
+          path: /tmp/heddlework-linux-smoke-results
+          if-no-files-found: warn
+          retention-days: 7

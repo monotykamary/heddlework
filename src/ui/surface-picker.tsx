@@ -29,8 +29,8 @@ export function SurfacePickerPanel({ surfaces, fullscreen, fullscreenProgress, f
               ? <text key="empty" style={{ color: colors.textFaint, fontSize: 10 }}>No surfaces are registered.</text>
               : visibleRows.map((row, visibleIndex) => (
                 <div key={`surface-row-${virtualWindow.windowStart + visibleIndex}`} style={{ width: '100%', minHeight: 101, flexShrink: 0, display: 'flex', flexDirection: 'row', gap: 9, paddingBottom: 9 }}>
-                  {row.map((surface) => <SurfaceCard key={surface.id} surface={surface} onClick={() => onSelect(surface.id)} />)}
-                  {row.length < columns && <div style={{ minWidth: 0, flexBasis: 0, flexGrow: columns - row.length }} />}
+                  {row.map((surface) => <div key={surface.id} style={{ width: 0, minWidth: 0, flexBasis: 0, flexGrow: 1, display: 'flex' }}><SurfaceCard surface={surface} onClick={() => onSelect(surface.id)} /></div>)}
+                  {row.length < columns && <div style={{ width: 0, minWidth: 0, flexBasis: 0, flexGrow: columns - row.length }} />}
                 </div>
               ))}
           </NativeVirtualList>
@@ -63,12 +63,11 @@ function PanelFrame({ testId, title, icon, fullscreen, fullscreenProgress, fulls
 }
 
 function SurfaceCard({ surface, onClick }: { surface: SurfaceDescriptor; onClick(): void }) {
-  const { mobile } = useResponsiveLayout()
   return (
-    <div testId={`surface-option-${surface.id}`} tabIndex={0} style={{ minWidth: mobile ? 0 : 170, minHeight: 92, flexBasis: 0, flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 8, padding: 13, borderRadius: 9, borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.card, cursor: 'pointer', hover: { backgroundColor: colors.hover } }} onClick={onClick} onKeyDown={(event) => { if (event.key === 'enter') onClick() }}>
+    <div testId={`surface-option-${surface.id}`} tabIndex={0} style={{ width: '100%', minWidth: 0, minHeight: 92, flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 8, padding: 13, borderRadius: 9, borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.card, cursor: 'pointer', hover: { backgroundColor: colors.hover } }} onClick={onClick} onKeyDown={(event) => { if (event.key === 'enter') onClick() }}>
       <Icon name={surface.icon} size={17} color={colors.text} />
       <text style={{ color: colors.text, fontSize: 12, fontWeight: 550 }}>{surface.title}</text>
-      <text style={{ color: colors.textFaint, fontSize: 9, lineHeight: 14 }}>{surface.description}</text>
+      <text style={{ minHeight: 28, color: colors.textFaint, fontSize: 9, lineHeight: 14 }}>{surface.description}</text>
     </div>
   )
 }

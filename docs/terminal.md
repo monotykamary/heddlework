@@ -114,7 +114,9 @@ Light mode enforces a 4.5:1 minimum foreground/background contrast ratio using W
 
 GPUix 0.7 removed its process-wide `Tab` and `Shift+Tab` traversal bindings. Both keys now reach the focused terminal's `onKeyDown` handler directly, while applications that want traversal can call `focusNext()` or `focusPrevious()` explicitly. Heddlework therefore no longer needs the temporary `captureTab` host prop, and its terminal UI regression always sends both Tab variants through the native input pipeline.
 
-`patches/gpuix-0.7.0-heddlework.patch` contains the remaining terminal primitive and performance work on top of the published 0.7.0 release, including native/React typings, direct binary frame staging, stable atlas presentation, the nonblocking AppKit pump, renderer capability detection, and terminal regressions. The application feature-detects both `supportsNativeTerminal()` and `setTerminalFrame()` and remains buildable against an unpatched package.
+The desktop runtime is provisioned with `bun run setup:native` from the immutable GPUix/Zed revisions in `gpuix-runtime.json`. The installer builds matching native and React packages, preserves the application React singleton, and verifies the terminal/window APIs. Desktop startup rejects incompatible stock GPUix rather than silently losing terminal or window behavior. `patches/gpuix-0.7.0-heddlework.patch` is a historical patch against the published 0.7.0 baseline, not the current installation recipe; do not apply it over the reconciled upstream sources.
+
+The renderer still feature-detects `supportsNativeTerminal()` to choose the native painter or the portable grid fallback. This painter fallback does not substitute for installing a compatible desktop runtime.
 
 ## Native frame pipeline
 
@@ -126,7 +128,9 @@ The embedded AppKit pump drains pending native events and ready CoreFoundation s
 
 ## Web and mobile path
 
-Keep the current split for companion clients:
+The browser client now reuses the existing terminal UI through a remote terminal-service adapter. The authenticated host owns the PTY and VT state, sends grid snapshots, and accepts bounded terminal input/resize commands. The DOM host provides browser composition/paste input and a mobile software-keyboard target; neither xterm.js nor a WASM runtime is required for this path.
+
+Keep the following extension boundary for future companion renderers:
 
 1. a host process owns the PTY and transports ordered bytes plus resize/input events;
 2. Ghostty's VT core, compiled natively or to WASM, can replace `VtEmulator` behind the snapshot/session boundary;

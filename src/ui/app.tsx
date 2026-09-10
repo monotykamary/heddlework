@@ -1,4 +1,5 @@
 import { pickWorkspaceDirectory } from './open-external.ts'
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useGpuixRequired, useWindowInsets, useWindowSize } from '@gpuix/react'
 import type { WorkbenchController } from '../workbench/controller.ts'
@@ -29,6 +30,8 @@ import type { TerminalSessionService } from '../terminal/service.ts'
 import type { BrowserSessionService } from '../browser/service.ts'
 import { BrowserServiceProvider } from './browser-context.tsx'
 import { BrowserNativeHost } from './browser-host.tsx'
+import { LinuxResizeHandles, LinuxWindowChrome, useNativeWindowChrome } from './linux-window-chrome.tsx'
+import type { WindowControlRenderer } from './window-controls.ts'
 
 type Surface = 'chat' | 'flows' | 'settings'
 type RightPanel = 'notifications' | 'surfaces' | `surface:${string}`
@@ -62,10 +65,12 @@ export function WorkbenchApp({
   pickDirectory?: typeof pickWorkspaceDirectory
   onQuit?(): void
 }) {
-  const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot)
+  const state = useSyncExternalStore(controller.subscribeShell, controller.getSnapshot)
   const theme = useSyncExternalStore(themeManager.subscribe, themeManager.getSnapshot)
   const uiSnapshot = useSyncExternalStore(ui.subscribe, ui.getSnapshot)
   const renderer = useGpuixRequired()
+  const windowControls = renderer as WindowControlRenderer
+  const nativeChrome = useNativeWindowChrome(windowControls)
   const windowSize = useWindowSize({ intervalMs: 50 })
   const windowInsets = useWindowInsets({ intervalMs: 50 })
   const safeWidth = Math.max(1, windowSize.width - windowInsets.effective.left - windowInsets.effective.right)
@@ -266,13 +271,13 @@ export function WorkbenchApp({
   const mainWidth = safeWidth - (layout.navigationOverlay ? 0 : layout.sidebarWidth * animatedSidebarProgress)
   const standardPanelWidth = Math.min(mainWidth, Math.max(420, Math.floor(mainWidth * 0.44)))
   const panelWidth = layout.panelOverlay ? safeWidth : displayedRightPanel === 'notifications' ? Math.min(422, mainWidth) : standardPanelWidth
-  const safeHeight = Math.max(1, windowSize.height - windowInsets.effective.top - windowInsets.effective.bottom)
+  const safeHeight = Math.max(1, windowSize.height - windowInsets.effective.top - windowInsets.effective.bottom - nativeChrome.height)
   const restDockHeight = Math.max(TERMINAL_DOCK_MIN_HEIGHT, Math.min(Math.floor(safeHeight * 0.7), bottomTerminalHeight))
   const dockHeight = !bottomTerminalOpen || panelFullscreenTarget ? 0 : bottomFullscreenVisible ? safeHeight : restDockHeight
   const showBottomDock = Boolean(terminals) && (bottomTerminalOpen || bottomTerminalMounted)
   const panelFullscreenProgress = panelFullscreenTarget ? 1 : 0
-  const sidebarToggleLeft = process.platform === 'darwin' ? 90 : layout.navigationOverlay ? 10 : 10 + 54 * animatedSidebarProgress
-  const collapsedChromeInset = process.platform === 'darwin' ? 132 : 54
+  const sidebarToggleLeft = hasNativeTrafficLights() ? 90 : layout.navigationOverlay ? 10 : 10 + 54 * animatedSidebarProgress
+  const collapsedChromeInset = hasNativeTrafficLights() ? 132 : 54
   const contentSidebarProgress = layout.navigationOverlay ? 0 : animatedSidebarProgress
   const flowsTitlebarInset = 24 + (collapsedChromeInset - 24) * (1 - contentSidebarProgress)
   const settingsTitlebarInset = 18 + (collapsedChromeInset - 18) * (1 - contentSidebarProgress)
@@ -342,9 +347,12 @@ export function WorkbenchApp({
     <BrowserServiceProvider service={browsers}>
     <ResponsiveLayoutProvider layout={layout}>
       <div testId="workbench-root" style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: colors.background, color: colors.text, overflow: 'hidden' }}>
+        {nativeChrome.height > 0 && nativeChrome.state && (
+          <LinuxWindowChrome renderer={windowControls} state={nativeChrome.state} title={state.windowTitle} onQuit={onQuit} reducedMotion={typeof process !== 'undefined' && process.env.HEDDLEWORK_REDUCED_MOTION === '1'} />
+        )}
         <div
           testId="workbench-safe-area"
-          style={{ position: 'absolute', top: windowInsets.effective.top, right: windowInsets.effective.right, bottom: windowInsets.effective.bottom, left: windowInsets.effective.left, display: 'flex', flexDirection: 'row', backgroundColor: colors.background, overflow: 'hidden' }}
+          style={{ position: 'absolute', top: windowInsets.effective.top + nativeChrome.height, right: windowInsets.effective.right, bottom: windowInsets.effective.bottom, left: windowInsets.effective.left, display: 'flex', flexDirection: 'row', backgroundColor: colors.background, overflow: 'hidden' }}
         >
           {!layout.navigationOverlay && sidebarHost}
           <div testId="workbench-content-host" style={{ position: 'relative', display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, height: '100%', overflow: 'hidden' }}>
@@ -465,6 +473,7 @@ export function WorkbenchApp({
             </MotionDiv>
           )}
         </div>
+        {nativeChrome.height > 0 && nativeChrome.state && <LinuxResizeHandles state={nativeChrome.state} />}
       </div>
     </ResponsiveLayoutProvider>
     </BrowserServiceProvider>

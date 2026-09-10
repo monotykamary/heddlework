@@ -1,3 +1,4 @@
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import type { TerminalSessionService } from '../terminal/service.ts'
 import type { BrowserSessionService } from '../browser/service.ts'
@@ -31,7 +32,7 @@ export function SettingsView({
   onClose(): void
 }) {
   const { mobile, compact, contentGutter } = useResponsiveLayout()
-  const resolvedTitlebarInset = titlebarInset ?? (compact ? (process.platform === 'darwin' ? 132 : 54) : 18)
+  const resolvedTitlebarInset = titlebarInset ?? (compact ? (hasNativeTrafficLights() ? 132 : 54) : 18)
   return (
     <div testId="settings-view" style={{ height: '100%', minWidth: 0, flexGrow: 1, display: 'flex', flexDirection: 'column', backgroundColor: colors.background }}>
       <MotionDiv initial={false} animate={{ paddingLeft: resolvedTitlebarInset }} transition={LAYOUT_MOTION_TRANSITION} style={{ height: 52, flexShrink: 0, display: 'flex', flexDirection: 'row', alignItems: 'center', paddingLeft: resolvedTitlebarInset, paddingRight: 16, borderWidth: 1, borderColor: colors.border }}>

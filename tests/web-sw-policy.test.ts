@@ -1,0 +1,8 @@
+import { describe, expect, it } from 'bun:test'
+import { canStoreShellResponse, isPrivateWebPath, isPublicShellRequest, ownedWebCacheName, staleOwnedWebCaches, WEB_CACHE_PREFIX } from '../src/web/sw-policy.ts'
+describe('web offline cache policy', () => {
+ const origin = 'https://workbench.example'; const shell = ['/index.html', '/main.js', '/styles.css']
+ it('names only Heddlework-owned caches', () => { expect(ownedWebCacheName('abc')).toBe(`${WEB_CACHE_PREFIX}abc`); expect('other-product-v1'.startsWith(WEB_CACHE_PREFIX)).toBe(false); expect(staleOwnedWebCaches(['other-product-v1', `${WEB_CACHE_PREFIX}old`, `${WEB_CACHE_PREFIX}current`], `${WEB_CACHE_PREFIX}current`)).toEqual([`${WEB_CACHE_PREFIX}old`]) })
+ it('excludes auth queries, private routes, and other origins', () => { expect(isPublicShellRequest(new Request(`${origin}/?token=secret`), shell, origin)).toBe(false); expect(isPublicShellRequest(new Request(`${origin}/main.js?token=secret`), shell, origin)).toBe(false); expect(isPublicShellRequest(new Request(`${origin}/health`), shell, origin)).toBe(false); expect(isPrivateWebPath('/api/session')).toBe(true); expect(isPublicShellRequest(new Request('https://other.example/main.js'), shell, origin)).toBe(false) })
+ it('stores only successful non-private basic/default responses', () => { expect(canStoreShellResponse(new Response('ok', { status: 200 }))).toBe(true); expect(canStoreShellResponse(new Response('<html>missing asset fallback</html>', { status: 404, headers: { 'content-type': 'text/html' } }))).toBe(false); expect(canStoreShellResponse(new Response('no', { status: 401 }))).toBe(false); expect(canStoreShellResponse(new Response('no', { status: 200, headers: { 'set-cookie': 'token=x' } }))).toBe(false) })
+})

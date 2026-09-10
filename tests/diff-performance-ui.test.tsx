@@ -5,6 +5,8 @@ import { createTestRoot, hasNativeTestRenderer } from '@gpuix/react/testing'
 import { NativeDiffViewport, WrappedDiff } from '../src/ui/diff-panel.tsx'
 
 const describeNative = hasNativeTestRenderer ? describe : describe.skip
+// `check` repeats these budgets in a fresh process after the functional suite.
+const enforceBudgets = process.env.HEDDLEWORK_PERFORMANCE_BUDGETS === '1'
 
 describeNative('diff viewport performance', () => {
   it('bounds the first native reconciliation while keeping the remaining lines accessible', async () => {
@@ -20,7 +22,7 @@ describeNative('diff viewport performance', () => {
     const elapsed = performance.now() - startedAt
     const automation = await connectTest(root.renderer)
 
-    expect(elapsed).toBeLessThan(2_500)
+    if (enforceBudgets) expect(elapsed).toBeLessThan(2_500)
     expect(await automation.getByTestId('diff-wrapped-code').count()).toBe(400)
     expect(await automation.getByTestId('diff-wrapped-show-more').count()).toBe(1)
     const wrappedBounds = await automation.getByTestId('diff-wrapped-viewport').bounds()
@@ -51,7 +53,7 @@ describeNative('diff viewport performance', () => {
     const elapsed = performance.now() - startedAt
     const automation = await connectTest(root.renderer)
 
-    expect(elapsed).toBeLessThan(3_000)
+    if (enforceBudgets) expect(elapsed).toBeLessThan(3_000)
     expect(await automation.getByTestId('diff-native').count()).toBe(1)
     expect(await automation.getByTestId('diff-horizontal-scroll').count()).toBe(0)
     expect(await automation.getByTestId('diff-sticky-gutter').count()).toBe(0)
@@ -65,10 +67,13 @@ describeNative('diff viewport performance', () => {
     const patch = `diff --git a/deep.ts b/deep.ts\n@@ -1,10000 +1,10000 @@\n${body}`
     const file = { path: 'deep.ts', patch, additions: 0, deletions: 0 }
     const root = createTestRoot()
+    let commits = 0
     root.render(
-      <div style={{ width: 620, height: 560, display: 'flex' }}>
-        <NativeDiffViewport patch={patch} files={[file]} canvasWidth={4_000} />
-      </div>,
+      <React.Profiler id="native-diff-scroll" onRender={() => { commits += 1 }}>
+        <div style={{ width: 620, height: 560, display: 'flex' }}>
+          <NativeDiffViewport patch={patch} files={[file]} canvasWidth={4_000} />
+        </div>
+      </React.Profiler>,
     )
     const automation = await connectTest(root.renderer)
     const viewport = await automation.getByTestId('diff-native-viewport').bounds()
@@ -78,11 +83,14 @@ describeNative('diff viewport performance', () => {
     }
     root.renderer.flush()
 
+    const settledCommits = commits
+    expect(settledCommits).toBeGreaterThan(0)
     const settledStartedAt = performance.now()
     for (let index = 0; index < 12; index += 1) {
       root.renderer.nativeSimulateScrollWheel(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2, 0, -400)
     }
-    expect(performance.now() - settledStartedAt).toBeLessThan(300)
+    if (enforceBudgets) expect(performance.now() - settledStartedAt).toBeLessThan(300)
+    expect(commits).toBe(settledCommits)
     expect(await automation.getByTestId('diff-native').count()).toBe(1)
     expect(await automation.getByTestId('diff-native-show-more').count()).toBe(0)
     expect(await automation.getByTestId('diff-gutter-edge').count()).toBe(0)

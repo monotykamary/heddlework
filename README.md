@@ -41,7 +41,7 @@ Today, Heddlework is a fast native desktop preview for [Pi](https://github.com/e
 | Codex adapter | **Planned** |
 | Claude adapter | **Planned** |
 | Signed desktop distribution | **Planned** |
-| Web and mobile companions | **Longer term** |
+| Web and mobile companions | **Preview** — authenticated browser/PWA client with a responsive mobile layout |
 
 ## Why Heddlework?
 
@@ -76,6 +76,7 @@ Requirements:
 git clone https://github.com/monotykamary/heddlework.git
 cd heddlework
 bun install --frozen-lockfile
+bun run setup:native
 bun run start -- /path/to/repository
 ```
 
@@ -97,6 +98,17 @@ Build the current unsigned executable:
 bun run build
 ./dist/heddlework /path/to/repository
 ```
+
+### Web workspace source preview
+
+The browser client renders the shared workbench UI and talks to the same controller used by the native window. Remote access is off by default. To build, start a loopback headless host, and print a fragment-based pairing link:
+
+```bash
+bun run build:web
+HEDDLEWORK_HOST_PRINT_TOKEN=1 bun run host -- /path/to/repository
+```
+
+For rebuild-on-save development, use `bun run dev:web -- /path/to/repository` (optionally with `HEDDLEWORK_DEMO=1`). Open the printed `http://127.0.0.1:4817/#token=…` URL. Non-loopback access additionally requires `HEDDLEWORK_HOST_ALLOW_NETWORK=1` and exact `HEDDLEWORK_HOST_ORIGINS`; use HTTPS before sending pairing credentials over an untrusted network. See [Community web port](docs/community-web-port.md) for runnable LAN/TLS setups, authentication, terminal architecture, validation scope, source attribution, and current mobile limitations.
 
 ### Linux desktop integration
 
@@ -145,15 +157,15 @@ Extension interactions are hosted in the main conversation area rather than embe
 
 ## Install later: product channels
 
-These channels describe the intended distribution path; they are **not available yet**.
+The web and responsive mobile source preview is available today, but supported distribution channels are not.
 
 | Channel | Intended path |
 | --- | --- |
 | Desktop | Signed and notarized macOS, Windows, and Linux downloads from GitHub Releases, followed by native package-manager channels |
-| Web | An installable browser/PWA client connected to a local or remote Heddlework host |
-| Mobile | Companion clients for steering, approvals, notifications, task triage, and artifact review |
+| Web | Supported deployment of the current browser/PWA client |
+| Mobile | Native companion clients beyond the current responsive browser preview |
 
-The desktop application remains the primary environment for local repositories, terminals, worktrees, and native agent processes. Web and mobile are planned as additional surfaces over the same workspace model, not separate products.
+The desktop application remains the primary environment for local repositories, terminals, worktrees, and native agent processes. Web and mobile remain additional surfaces over the same workspace model, not separate products.
 
 ## Current workflow
 
@@ -182,6 +194,13 @@ HEDDLEWORK_PI=/absolute/path/to/pi bun run start -- /path/to/repository
 | `HEDDLEWORK_NO_SESSION=1` | Disable Pi session persistence |
 | `HEDDLEWORK_DEMO=1` | Use the deterministic no-credentials demo transport |
 | `HEDDLEWORK_DEBUG_OVERLAY=full` | Show GPUIX frame timings (`minimal` is also supported) |
+| `HEDDLEWORK_HOST=1` | Opt the native desktop process into serving the workspace host |
+| `HEDDLEWORK_HOST_PORT` | Host port (default `4817`) |
+| `HEDDLEWORK_HOST_BIND` | Bind address (default `127.0.0.1`) |
+| `HEDDLEWORK_HOST_ALLOW_NETWORK=1` | Required before binding a non-loopback address |
+| `HEDDLEWORK_HOST_ORIGINS` | Comma-separated exact browser origins; required for non-loopback binding |
+| `HEDDLEWORK_HOST_PRINT_TOKEN=1` | Print the fragment-based pairing URL; keep process output private |
+| `HEDDLEWORK_WEB_ROOT` | Built web-client directory; defaults to `dist/web` when present |
 
 ## Architecture
 
@@ -228,17 +247,35 @@ Pi remains authoritative for Pi messages and sessions. Streaming state is tempor
 - [ ] Durable dependency graphs and safe checkout lanes
 - [ ] Mutation receipts and artifact review
 - [ ] Signed desktop installers and automatic updates
-- [ ] Web workspace client
-- [ ] Mobile companion clients
+- [x] Authenticated web workspace client and responsive mobile browser preview
+- [ ] Native mobile companion clients
 
 ## Development
 
 ```bash
 bun install --frozen-lockfile
+bun run setup:native
 bun run typecheck
+bun run typecheck:web
 bun run test
+bun run test:web
 bun run build
+bun run build:web
 ```
+
+`setup:native` builds matching GPUix native/React packages from the full revisions in
+`gpuix-runtime.json`, then links them into this checkout. Run it again after `bun install`
+restores the stock dependency. It reuses verified builds and removes its private Cargo
+target after installation. Rust and the platform GPUI system dependencies are required;
+macOS additionally needs Xcode's Metal toolchain. The macOS default includes CEF;
+`HEDDLEWORK_WITHOUT_CEF=1 bun run setup:native` explicitly builds without embedded Chromium.
+Set `HEDDLEWORK_KEEP_BUILD_CACHE=1` only when iterating on native code.
+
+Linux window controls follow the compositor's effective decoration mode: client-side
+windows receive minimize, maximize/restore, close, and native drag/resize regions;
+server-decorated windows keep compositor controls. `HEDDLEWORK_REDUCED_MOTION=1` disables
+the control press animation. See [Linux integration](packaging/linux/README.md) and
+[platform alignment](docs/platform-alignment.md) for validation scope.
 
 The native test suite exercises the real GPUIX reconciler and covers shell interactions, session paging, transcript following, clipboard media, extension dialogs, notifications, native diff virtualization, deep-scroll performance, and spring panel geometry.
 
@@ -248,6 +285,7 @@ The native test suite exercises the real GPUIX reconciler and covers shell inter
 - Icons include paths adapted from [Lucide](https://github.com/lucide-icons/lucide).
 - Pi integration targets [Pi](https://github.com/earendil-works/pi-coding-agent).
 - Native rendering is provided by [GPUIX](https://github.com/remorses/gpuix).
+- The web/host/DOM source preview cherry-picks and adapts the MIT-licensed [0xCUB3 fork](https://github.com/0xCUB3/heddlework) at `d55e9ad`; see [port scope and attribution](docs/community-web-port.md).
 
 See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for complete attribution.
 

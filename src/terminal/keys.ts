@@ -1,4 +1,5 @@
 export interface TerminalKeyEvent {
+  readonly eventType?: string
   readonly key?: string
   readonly keyChar?: string
   readonly modifiers?: {

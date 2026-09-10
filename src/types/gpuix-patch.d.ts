@@ -37,6 +37,7 @@ declare module '@gpuix/react' {
     /** Runs after the frame loop observes the last native window closing. */
     onTerminated?: () => void
   }
+
 }
 
 interface BrowserElementProps {

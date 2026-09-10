@@ -41,6 +41,35 @@ class CachedDeferredCatalog extends PiSessionCatalog {
   release(): void { this.#releaseList?.() }
 }
 
+class BackgroundDeferredCatalog extends PiSessionCatalog {
+  readonly limits: number[] = []
+  #listener: (() => void) | undefined
+  #release: (() => void) | undefined
+  #gate: Promise<void> | undefined
+
+  override subscribe(_cwd: string, listener: () => void): () => void {
+    this.#listener = listener
+    return () => { this.#listener = undefined }
+  }
+
+  override async list(_cwd: string, limit?: number): Promise<PiSessionSummary[]> {
+    this.limits.push(limit ?? sessions.length)
+    if (this.#gate) await this.#gate
+    return sessions.slice(0, limit)
+  }
+
+  invalidateAndBlock(): void {
+    this.#gate = new Promise<void>((resolve) => { this.#release = resolve })
+    this.#listener?.()
+  }
+
+  release(): void {
+    this.#gate = undefined
+    this.#release?.()
+    this.#release = undefined
+  }
+}
+
 class DeferredTransport implements AgentTransport {
   readonly events = new Set<(event: RpcRecord) => void>()
   readonly statuses = new Set<(status: TransportStatus) => void>()
@@ -111,6 +140,31 @@ describe('session history startup and paging', () => {
     } finally {
       transport.release()
       await starting.catch(() => undefined)
+      await controller.dispose()
+    }
+  })
+
+  it('awaits dirty replay when load-more joins a background scan', async () => {
+    const transport = new DeferredTransport()
+    const catalog = new BackgroundDeferredCatalog()
+    const controller = new WorkbenchController(transport, '/tmp/project-0', testControllerDependencies(catalog))
+    transport.release()
+    try {
+      await controller.start()
+      expect(controller.getSnapshot().sessions).toHaveLength(120)
+
+      catalog.invalidateAndBlock()
+      await waitFor(() => catalog.limits.length === 2)
+      const loadingMore = controller.loadMoreSessions()
+      expect(controller.getSnapshot().sessionsLoading).toBe(true)
+      catalog.release()
+      await loadingMore
+
+      expect(catalog.limits).toEqual([121, 121, 241])
+      expect(controller.getSnapshot().sessions).toHaveLength(240)
+      expect(controller.getSnapshot().sessionsLoading).toBe(false)
+    } finally {
+      catalog.release()
       await controller.dispose()
     }
   })

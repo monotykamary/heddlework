@@ -31,6 +31,7 @@ const output = bundleChromium
 try {
   rmSync(dist, { recursive: true, force: true })
   mkdirSync(dirname(output), { recursive: true })
+  await import('./build-web.ts')
 
   const compile: { outfile: string; target?: Bun.Build.CompileTarget } = { outfile: output }
   if (process.env.COMPILE_TARGET) compile.target = process.env.COMPILE_TARGET as Bun.Build.CompileTarget
@@ -50,8 +51,11 @@ try {
 
   if (process.platform !== 'win32') chmodSync(output, 0o755)
   if (bundleChromium) {
-    const sourceMap = resolve(dirname(output), 'main.js.map')
-    if (existsSync(sourceMap)) renameSync(sourceMap, resolve(dist, 'Heddlework.js.map'))
+    // Bun versions use either the output name or the entrypoint for external maps.
+    // Debug data cannot remain in Contents/MacOS, where codesign expects code.
+    for (const sourceMap of [`${output}.map`, resolve(dirname(output), 'main.js.map')]) {
+      if (existsSync(sourceMap)) renameSync(sourceMap, resolve(dist, 'Heddlework.js.map'))
+    }
   }
   if (bundleChromium && cefPackagingDirectory && nativePackagingDirectory) {
     validateCefArtifacts(nativePackagingDirectory, cefPackagingDirectory)
@@ -109,6 +113,7 @@ function packageMacApp(bundle: string, cefSource: string, executable: string): v
   if (existsSync(resolve(cefSource, 'CREDITS.html'))) {
     cpSync(resolve(cefSource, 'CREDITS.html'), resolve(resources, 'Chromium-CREDITS.html'))
   }
+  cpSync(resolve(dist, 'web'), resolve(resources, 'web'), { recursive: true })
   writeFileSync(resolve(contents, 'Info.plist'), appInfoPlist())
 
   const launcher = resolve(dist, 'heddlework')

@@ -81,6 +81,9 @@ describeNative('browser panel', () => {
       const headerBounds = await automation.getByTestId('right-panel-header').bounds()
       const toolbarBounds = await automation.getByTestId('browser-toolbar').bounds()
       expect(toolbarBounds.y).toBe(headerBounds.y + headerBounds.height)
+      expect(headerBounds.height).toBe(40)
+      // Native automation reports the content bounds, excluding the bottom border.
+      expect(toolbarBounds.height).toBe(37)
 
       await automation.getByTestId('browser-address').fill('localhost:4173/app')
       await automation.getByTestId('browser-address').click()

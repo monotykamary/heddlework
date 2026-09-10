@@ -1,3 +1,4 @@
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React, { memo, useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { PiSessionSummary } from '../pi/session-catalog.ts'
 import { PiSessionHistoryPager } from '../pi/session-history.ts'
@@ -86,7 +87,7 @@ export const FlowsView = memo(function FlowsView({ state, controller, runtime, t
     if (!state.session.isStreaming && state.messages.length > 0 && queueSize(state.queue) === 0) await controller.newSession()
     onClose()
   }
-  const titleInset = titlebarInset ?? (process.platform === 'darwin' ? 132 : layout.compact ? 54 : 24)
+  const titleInset = titlebarInset ?? (hasNativeTrafficLights() ? 132 : layout.compact ? 54 : 24)
 
   return (
     <div testId="flows-view" style={{ width: 0, minWidth: 0, flexGrow: 1, height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: colors.background, overflow: 'hidden' }}>

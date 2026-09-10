@@ -1,3 +1,4 @@
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React from 'react'
 import { basename } from 'node:path'
 import { Select, SelectContent, SelectItem, SelectTrigger, type SelectItemState, type SelectTriggerState } from '@gpuix/react'
@@ -31,7 +32,7 @@ export function ChatHeader({
   const projectName = basename(state.workspacePath) || state.workspacePath
   const title = activeThreadTitle(state)
   const layout = useResponsiveLayout()
-  const collapsedLeftInset = process.platform === 'darwin' ? 132 : 54
+  const collapsedLeftInset = hasNativeTrafficLights() ? 132 : 54
   return (
     <MotionDiv
       initial={false}

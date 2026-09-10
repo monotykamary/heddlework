@@ -1,4 +1,5 @@
 import { useDirectoryPicker } from './use-directory-picker.ts'
+import { hasNativeTrafficLights } from './window-chrome.ts'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, useGpuixRequired, type SelectItemState, type SelectTriggerState } from '@gpuix/react'
 import { resolve } from 'node:path'
@@ -296,7 +297,7 @@ function ProjectFilter({ value, options, onChange }: { value: string; options: A
 
 function BrandHeader() {
   return (
-    <div testId="sidebar-brand" style={{ height: 52, flexShrink: 0, display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingLeft: process.platform === 'darwin' ? 90 : 0, backgroundColor: colors.sidebar }}>
+    <div testId="sidebar-brand" style={{ height: 52, flexShrink: 0, display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingLeft: hasNativeTrafficLights() ? 90 : 0, backgroundColor: colors.sidebar }}>
       <text style={{ color: colors.textMuted, fontSize: 12, fontWeight: 650 }}>Heddlework</text>
     </div>
   )
