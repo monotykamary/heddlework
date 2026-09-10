@@ -262,7 +262,18 @@ const Box = forwardRef<unknown, BoxElementProps>(function Box(all, ref) {
       node.textContent = ''
     }
     node.addEventListener('beforeinput', beforeInput)
-    return () => node.removeEventListener('beforeinput', beforeInput)
+    // Chromium may report clipboard pastes as plain insertText bursts; routing
+    // the paste event itself keeps bracketed-paste wrapping deterministic.
+    const onPaste = (event: ClipboardEvent) => {
+      event.preventDefault()
+      const text = event.clipboardData?.getData('text/plain')
+      if (text) sendTerminalText(text, true)
+    }
+    node.addEventListener('paste', onPaste)
+    return () => {
+      node.removeEventListener('beforeinput', beforeInput)
+      node.removeEventListener('paste', onPaste)
+    }
   }, [terminalInput, keyDown, id, nodeRef])
   if (keyDown) {
     handlers.onKeyDown = (event: React.KeyboardEvent) => {

@@ -14,6 +14,8 @@ const root = resolve(import.meta.dir, '..')
 const staticRoot = resolve(process.env.HEDDLEWORK_WEB_ROOT ?? resolve(root, 'dist', 'web'))
 const probeTimeoutMs = 120_000
 
+const PROBE_WRITE_LOG = process.env.HEDDLEWORK_PROBE_CONSOLE === '1'
+
 class RecordingPtyBackend implements TerminalBackend {
   readonly writes: string[] = []
   readonly resizes: Array<{ cols: number; rows: number }> = []
@@ -25,7 +27,9 @@ class RecordingPtyBackend implements TerminalBackend {
     return {
       ...(process.pid === undefined ? {} : { pid: process.pid }),
       write: (data) => {
-        this.writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data))
+        const text = typeof data === 'string' ? data : new TextDecoder().decode(data)
+        this.writes.push(text)
+        if (PROBE_WRITE_LOG) console.error(`[pty-write] ${JSON.stringify(text.slice(0, 120))}`)
         process.write(data)
       },
       resize: (cols, rows) => {
@@ -82,6 +86,7 @@ function observe(page: Page): PageEvidence {
   page.on('request', (request) => evidence.requests.push(request.url()))
   page.on('websocket', (socket) => evidence.sockets.push(socket.url()))
   page.on('pageerror', (error) => evidence.errors.push(error))
+  page.on('console', (message) => { if (process.env.HEDDLEWORK_PROBE_CONSOLE === '1') console.error(`[page:${message.type()}] ${message.text()}`) })
   return evidence
 }
 
@@ -172,6 +177,13 @@ async function mobileTerminalSmoke(
     assert(evidence.errors.length === 0, `Opening the mobile terminal crashed the workbench: ${evidence.errors[0]?.message ?? 'unknown error'}`)
     await waitFor(() => terminals.getStateSnapshot().sessions.length === 1, 'browser-created terminal session')
     const sessionId = terminals.getStateSnapshot().sessions[0]!.id
+    // Bracketed paste is a shell/readline configuration, not a web-port
+    // behavior: enable it deterministically so the paste-byte assertions pin
+    // the wrapping path regardless of the runner's bash defaults.
+    terminals.write(sessionId, '\x1b[?2004h')
+    await waitFor(() => terminals.grid(sessionId)?.bracketedPaste === true, 'terminal bracketed-paste mode')
+    // Let the frame carrying the flag reach the page before paste assertions.
+    await Bun.sleep(120)
     await waitFor(() => (terminals.getStateSnapshot().sessions[0]?.cols ?? 80) < 80, 'initial mobile terminal resize after spawn acknowledgement')
     const input = page.getByTestId('terminal-input-bottom')
     await input.waitFor({ state: 'visible' })

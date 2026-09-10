@@ -180,7 +180,15 @@ export interface TerminalKeyEffects {
  * ETX, and ordinary/paste keys keep their previous path.
  */
 export function dispatchTerminalKey(event: TerminalKeyEvent, effects: TerminalKeyEffects): void {
+  if (process.env.HEDDLEWORK_DEBUG_DISPATCH === '1') console.error(`[dispatch] eventType=${event.eventType ?? '-'} key=${event.key ?? '-'} keyChar=${JSON.stringify(event.keyChar ?? '')}`)
   const { grid } = effects
+  // The web/DOM host relays browser paste events as eventType 'paste' payloads;
+  // wrap them when the terminal negotiated bracketed-paste mode.
+  if (event.eventType === 'paste') {
+    const text = event.keyChar ?? ''
+    if (text) effects.write(grid?.bracketedPaste ? wrapBracketedPaste(text, true) : text)
+    return
+  }
   const command = resolveTerminalCommand(event, effects.platform)
   if (command === 'copy') {
     void Promise.resolve(effects.copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')).catch(() => undefined)
