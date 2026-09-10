@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { dispatchTerminalKey, encodeTerminalKey, resolveTerminalCommand, wrapBracketedPaste, type TerminalKeyEffects, type TerminalKeyEvent } from '../src/terminal/keys.ts'
+import { createTerminalCopyAction, TERMINAL_COPY_FAILED_MESSAGE } from '../src/ui/terminal-copy-feedback.ts'
 
 const ESC = String.fromCharCode(27)
 
@@ -114,5 +115,128 @@ describe('dispatchTerminalKey (shared production seam) - always run', () => {
     dispatchTerminalKey({ key: 'v', modifiers: { ctrl: true } }, effects)
     await Bun.sleep(1)
     expect(writes).toEqual([ESC + '[200~hi' + ESC + '[201~'])
+  })
+})
+
+describe('terminal copy feedback (WP-01 repair 2) — production action, always run', () => {
+  // WP-01 failure behavior: "a failed copy reports an error and never falls
+  // through to interrupt". These regressions run the production dispatch seam
+  // through the real createTerminalCopyAction adapter (not a test-only
+  // handler), with an injected writer and failure sink.
+  const COPY_KEY: TerminalKeyEvent = { key: 'c', modifiers: { ctrl: true, shift: true } }
+  const INTERRUPT_KEY: TerminalKeyEvent = { key: 'c', modifiers: { ctrl: true } }
+
+  function setup(writer: (text: string) => boolean | void | Promise<unknown>) {
+    const failures: Array<string | undefined> = []
+    const writes: string[] = []
+    let pasteReads = 0
+    let writerCalls = 0
+    const action = createTerminalCopyAction({
+      writer: (text: string) => {
+        writerCalls += 1
+        return writer(text)
+      },
+      onFailure: (failure) => failures.push(failure),
+    })
+    const effects: TerminalKeyEffects = {
+      platform: 'linux',
+      grid: { viewport: [{ text: 'SECRET-PAYLOAD-a1' }], bracketedPaste: false, applicationCursor: false },
+      write: (data: string) => {
+        writes.push(data)
+      },
+      copy: action.copy,
+      readPaste: () => {
+        pasteReads += 1
+        return Promise.resolve('pasted')
+      },
+    }
+    return { action, effects, failures, writes, pastes: () => pasteReads, calls: () => writerCalls }
+  }
+
+  it('publishes one generic failure with zero PTY bytes and no paste read when the writer resolves false', async () => {
+    const { effects, failures, writes, pastes } = setup(() => false)
+    dispatchTerminalKey(COPY_KEY, effects)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    expect(writes).toEqual([])
+    expect(pastes()).toBe(0)
+  })
+
+  it('handles rejection and synchronous throw as the same generic failure without PTY writes', async () => {
+    const rejected = setup(() => Promise.reject(new Error('clipboard helper exploded')))
+    dispatchTerminalKey(COPY_KEY, rejected.effects)
+    await Bun.sleep(1)
+    expect(rejected.failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    expect(rejected.writes).toEqual([])
+
+    const thrown = setup(() => {
+      throw new Error('boom before promise')
+    })
+    dispatchTerminalKey(COPY_KEY, thrown.effects)
+    await Bun.sleep(1)
+    expect(thrown.failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    expect(thrown.writes).toEqual([])
+  })
+
+  it('publishes nothing on success and clears a previous failure on the next attempt', async () => {
+    let result = false
+    const { effects, failures } = setup(() => result)
+    dispatchTerminalKey(COPY_KEY, effects)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    result = true
+    dispatchTerminalKey(COPY_KEY, effects)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE, undefined])
+  })
+
+  it('keeps plain Ctrl+C immediate while a copy is pending; the late failure adds no PTY bytes', async () => {
+    let settle!: (value: boolean) => void
+    const { effects, failures, writes } = setup(() => new Promise<boolean>((resolve) => {
+      settle = resolve
+    }))
+    dispatchTerminalKey(COPY_KEY, effects)
+    dispatchTerminalKey(INTERRUPT_KEY, effects)
+    expect(writes).toEqual([String.fromCharCode(3)])
+    settle(false)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    expect(writes).toEqual([String.fromCharCode(3)])
+  })
+
+  it('ignores stale completions and publishes nothing after disposal', async () => {
+    const resolvers: Array<(value: boolean) => void> = []
+    const { action, effects, failures, calls } = setup(() => new Promise<boolean>((resolve) => {
+      resolvers.push(resolve)
+    }))
+    dispatchTerminalKey(COPY_KEY, effects)
+    dispatchTerminalKey(COPY_KEY, effects)
+    resolvers[1]!(false)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    // The older attempt completing late cannot overwrite newer feedback.
+    resolvers[0]!(false)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, undefined, TERMINAL_COPY_FAILED_MESSAGE])
+
+    // A completion landing after disposal cannot publish component state.
+    dispatchTerminalKey(COPY_KEY, effects)
+    action.dispose()
+    resolvers[2]!(false)
+    await Bun.sleep(1)
+    expect(failures).toEqual([undefined, undefined, TERMINAL_COPY_FAILED_MESSAGE])
+    // A disposed action is inert and never reaches its writer again.
+    await action.copy('after dispose')
+    expect(calls()).toBe(3)
+    expect(failures).toEqual([undefined, undefined, TERMINAL_COPY_FAILED_MESSAGE])
+  })
+
+  it('publishes no clipboard payload or exception detail', async () => {
+    const { action, failures } = setup(() => Promise.reject(new Error('secret-exception-detail')))
+    await action.copy('SECRET-PAYLOAD-z9')
+    const published = failures.join(' ')
+    expect(published).toContain(TERMINAL_COPY_FAILED_MESSAGE)
+    expect(published).not.toContain('SECRET-PAYLOAD')
+    expect(published).not.toContain('secret-exception-detail')
   })
 })

@@ -1,9 +1,10 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { TerminalAppearance, TerminalGridSnapshot, TerminalPlacement, TerminalRow as TerminalGridRow, TerminalSessionId } from '../terminal/types.ts'
 import { dispatchTerminalKey, type TerminalKeyEvent } from '../terminal/keys.ts'
 import type { TerminalSessionService } from '../terminal/service.ts'
 import { copyTextToClipboard } from './clipboard-media.ts'
+import { createTerminalCopyAction } from './terminal-copy-feedback.ts'
 import { useTerminalGrid, useTerminalProjectionSuspended, useTerminalServiceSnapshot } from './terminal-context.tsx'
 import { colors } from './theme.ts'
 import { TERMINAL_CELL_WIDTH, TERMINAL_FONT_SIZE, TERMINAL_LINE_HEIGHT, TERMINAL_PADDING_X, TERMINAL_PADDING_Y, terminalGridSize } from './terminal-metrics.ts'
@@ -16,7 +17,7 @@ type TerminalCapableRenderer = {
   setTerminalFrame?: (elementId: number, metadata: string, cells: Uint8Array) => void
 }
 
-type TerminalCopy = (text: string) => void | Promise<unknown>
+export type TerminalCopy = (text: string) => void | boolean | Promise<unknown>
 
 export const TerminalView = memo(function TerminalView({
   service,
@@ -51,6 +52,13 @@ export const TerminalView = memo(function TerminalView({
   const sizeRef = useRef(size)
   sizeRef.current = size
   const inputId = useRef<number | undefined>(undefined)
+  // WP-01 repair 2: terminal-local copy failure feedback. The action consumes
+  // the clipboard writer's outcome, publishes one generic local error on
+  // definite failure, and is withdrawn when the view (or injected writer)
+  // changes so stale completions cannot publish component state.
+  const [copyFailure, setCopyFailure] = useState<string | undefined>(undefined)
+  const copyAction = useMemo(() => createTerminalCopyAction({ writer: copy, onFailure: setCopyFailure }), [copy])
+  useEffect(() => () => copyAction.dispose(), [copyAction])
 
   useEffect(() => {
     if (projectionSuspended || !sessionId) return
@@ -82,10 +90,10 @@ export const TerminalView = memo(function TerminalView({
       platform: process.platform,
       grid,
       write: (data) => service.write(sessionId, data),
-      copy,
+      copy: copyAction.copy,
       readPaste: () => pasteClipboardText(),
     })
-  }, [copy, service, sessionId])
+  }, [copyAction, service, sessionId])
 
   const onScroll = useCallback((event: { deltaY?: number }) => {
     if (!sessionId) return
@@ -150,6 +158,21 @@ export const TerminalView = memo(function TerminalView({
         onKeyDown={onKeyDown}
         onScroll={onScroll}
       />
+      {copyFailure ? (
+        <text
+          testId={'terminal-copy-failure-' + placement}
+          style={{
+            position: 'absolute',
+            left: TERMINAL_PADDING_X,
+            bottom: TERMINAL_PADDING_Y,
+            color: colors.diffDel,
+            fontSize: 10,
+            pointerEvents: 'none',
+          }}
+        >
+          {copyFailure}
+        </text>
+      ) : null}
     </div>
   )
 })

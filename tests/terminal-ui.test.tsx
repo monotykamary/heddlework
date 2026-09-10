@@ -115,6 +115,42 @@ describeNative('terminal panels', () => {
     }
   })
 
+  it('shows the copy failure label when the clipboard writer fails, and clears it on a successful retry', async () => {
+    const terminals = new TerminalSessionService({ cwd: '/tmp/heddlework-terminal-ui', backend: new MemoryTerminalBackend() })
+    services.push(terminals)
+    const sessionId = await terminals.spawn({ cols: 80, rows: 24 })
+    let copyResult: boolean = false
+    const root = createTestRoot({ width: 800, height: 420 })
+    try {
+      root.render(
+        <TerminalView
+          service={terminals}
+          sessionId={sessionId}
+          placement="bottom"
+          width={800}
+          height={420}
+          appearance="dark"
+          copy={() => copyResult}
+        />,
+      )
+      root.renderer.flush()
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      await Bun.sleep(1)
+      root.renderer.flush()
+      // WP-01 repair 2: a failed copy surfaces a local, generic failure label
+      // instead of failing silently (and never writes to the PTY).
+      expect(root.renderer.getPaintedText().some((text) => text.includes("Couldn't copy visible terminal text"))).toBe(true)
+
+      copyResult = true
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      await Bun.sleep(1)
+      root.renderer.flush()
+      expect(root.renderer.getPaintedText().some((text) => text.includes("Couldn't copy visible terminal text"))).toBe(false)
+    } finally {
+      root.unmount()
+    }
+  })
+
   it('opens the layout-owned bottom dock and the right terminal surface', async () => {
     const { controller, terminals } = createHarness()
     const root = createTestRoot({ width: 1_280, height: 720 })

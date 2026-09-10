@@ -165,7 +165,9 @@ export interface TerminalKeyEffects {
   readonly platform: string
   readonly grid: TerminalKeyGridLike | undefined
   readonly write: (data: string) => void
-  readonly copy: (text: string) => void | Promise<unknown>
+  /** Handled copy: the effect consumes the clipboard outcome (including
+   * failures) and reports its own feedback; it never falls back to the PTY. */
+  readonly copy: (text: string) => void | Promise<void>
   readonly readPaste: () => Promise<string | undefined>
 }
 
@@ -173,8 +175,9 @@ export interface TerminalKeyEffects {
  * Production terminal key dispatch (WP-01). This is the seam TerminalView.onKeyDown
  * calls so the exact handler body can be regression-tested without a native
  * GPUI renderer. Commands are resolved BEFORE terminal encoding: a copy command
- * never reaches the PTY (zero bytes, even when the clipboard write fails), plain
- * Ctrl+C is exactly one ETX, and ordinary/paste keys keep their previous path.
+ * never reaches the PTY (zero bytes, even when the clipboard write fails — the
+ * copy effect owns reporting that failure locally), plain Ctrl+C is exactly one
+ * ETX, and ordinary/paste keys keep their previous path.
  */
 export function dispatchTerminalKey(event: TerminalKeyEvent, effects: TerminalKeyEffects): void {
   const { grid } = effects
