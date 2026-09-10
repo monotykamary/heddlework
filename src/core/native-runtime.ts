@@ -120,7 +120,9 @@ type NativeLoadResult =
   | { status: 'failed'; error: string }
 
 function loadNativeExports(root: string, loader?: (specifier: string) => Record<string, unknown> | undefined): NativeLoadResult {
-  const specifier = join(root, 'node_modules/@gpuix/native')
+  // Honor the same override the runtime itself uses: when set, the app loads
+  // that addon, so verification must probe it rather than node_modules.
+  const specifier = process.env.NAPI_RS_NATIVE_LIBRARY_PATH ?? join(root, 'node_modules/@gpuix/native')
   const attempt = (): NativeLoadResult => {
     try {
       const loaded = loader ? loader(specifier) : (require(specifier) as Record<string, unknown>)
@@ -132,7 +134,7 @@ function loadNativeExports(root: string, loader?: (specifier: string) => Record<
     }
   }
   if (loader) return attempt()
-  if (!existsSync(join(specifier, 'index.js'))) return { status: 'unavailable' }
+  if (!specifier.endsWith('.node') && !existsSync(join(specifier, 'index.js'))) return { status: 'unavailable' }
   return attempt()
 }
 

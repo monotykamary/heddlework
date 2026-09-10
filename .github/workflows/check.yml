@@ -44,6 +44,8 @@ jobs:
         with:
           path: node_modules/.cache/heddlework-gpuix
           key: native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gpuix-runtime.json', 'bun.lock') }}
+      - name: Drop the published react package so setup can link the source build
+        run: rm -rf node_modules/@gpuix/react
       - run: bun run setup:native
       - name: Point verification at the source-built addon
         run: |
