@@ -182,7 +182,7 @@ export function dispatchTerminalKey(event: TerminalKeyEvent, effects: TerminalKe
   const { grid } = effects
   const command = resolveTerminalCommand(event, effects.platform)
   if (command === 'copy') {
-    void effects.copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')
+    void Promise.resolve(effects.copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')).catch(() => undefined)
     return
   }
   if (command === 'interrupt') {
