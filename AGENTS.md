@@ -9,6 +9,12 @@ work. React + GPUIX (GPU-rendered) on the client; Pi RPC is the first harness ad
 model: **the harness is authoritative for its own execution and transcripts; Heddlework projects
 state and never invents a second agent loop.**
 
+**This fork's purpose is the Linux support contribution.** Primary development target is
+Linux on Omarchy (Arch + Hyprland + Wayland, x86_64): verify gates there first, keep CI Linux-first
+(`check.yml` builds the pinned runtime on ubuntu-24.04 and tests against it via
+`NAPI_RS_NATIVE_LIBRARY_PATH`), and treat macOS/Windows as best-effort compatibility, not the
+development lane. See `docs/plans/linux-omarchy-roadmap.md` and `docs/linux-acceptance.md`.
+
 ## Verification gates (run these, don't guess)
 
 ```bash
