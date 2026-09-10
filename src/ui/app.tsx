@@ -445,8 +445,8 @@ export function WorkbenchApp({
                 <text style={{ color: colors.text, fontSize: 15, fontWeight: 600 }}>Stop the current run and open this thread?</text>
                 <text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>This window currently runs one Pi session at a time. Switching interrupts the current run.</text>
                 <div style={{ display: 'flex', flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
-                  <Button label="Stay here" tone="quiet" onClick={() => controller.cancelPendingNavigation()} />
-                  <Button label="Stop and switch" tone="primary" onClick={() => void controller.confirmPendingNavigation()} />
+                  <Button label="Stay here" tone="quiet" testId="session-switch-stay" onClick={() => controller.cancelPendingNavigation()} />
+                  <Button label="Stop and switch" tone="primary" testId="session-switch-stop" onClick={() => void controller.confirmPendingNavigation()} />
                 </div>
               </div>
             </div>

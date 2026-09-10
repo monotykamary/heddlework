@@ -130,6 +130,7 @@ export class WorkbenchController {
   #pauseAfterTools = false
   #runGeneration = 0
   #refreshGeneration = 0
+  #deferredSwitch: PiSessionSummary | undefined = undefined
   readonly #streamDeltas: RpcRecord[] = []
   #streamDeltaTimer: ReturnType<typeof setTimeout> | undefined
   readonly #streamDeltaFrameMs: number
@@ -583,7 +584,12 @@ export class WorkbenchController {
       this.#setState((state) => addNotice(state, 'warning', 'Reconnect Pi before switching sessions'))
       return
     }
-    if (this.#sessionTransitionDepth > 0) return
+    if (this.#sessionTransitionDepth > 0) {
+      // A transition is already in flight; remember the latest target instead of
+      // dropping the click, and land on it when the transition finishes.
+      this.#deferredSwitch = session
+      return
+    }
     if (this.#state.session.isStreaming && !options.confirmed) {
       this.#patch({ pendingNavigation: { kind: 'session', session, runGeneration: this.#runGeneration } })
       return
@@ -643,6 +649,7 @@ export class WorkbenchController {
     } finally {
       this.#sessionTransitionDepth = Math.max(0, this.#sessionTransitionDepth - 1)
       this.#resumeQueueAfterTransition()
+      this.#resumeDeferredSwitch()
     }
   }
 
@@ -966,6 +973,7 @@ export class WorkbenchController {
     this.#listeners.clear()
     this.#shellListeners.clear()
     this.#editorListeners.clear()
+    this.#deferredSwitch = undefined
   }
 
   async #sendPrompt(message: string, images: readonly ComposerImage[], restoreDraft: boolean): Promise<boolean> {
@@ -1398,6 +1406,18 @@ export class WorkbenchController {
     queueMicrotask(() => {
       if (this.#sessionTransitionDepth === 0 && !this.#state.session.isStreaming) this.#drainQueue()
     })
+  }
+
+  // Clicks that land during a transition are deferred (latest wins) and retried
+  // once the transition finishes, so a slow Pi never silently eats a selection.
+  #resumeDeferredSwitch(): void {
+    if (this.#sessionTransitionDepth > 0) return
+    const deferred = this.#deferredSwitch
+    if (!deferred) return
+    this.#deferredSwitch = undefined
+    if (this.#disposed || this.#state.connection !== 'connected') return
+    if (isCurrentPiSession(deferred, this.#state.session)) return
+    void this.switchSession(deferred)
   }
 
   async #loadInitialTranscript(session: PiSessionState, leafId?: string | null): Promise<{ page: SessionHistoryPage; pager: PiSessionHistoryPager | undefined }> {

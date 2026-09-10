@@ -10,6 +10,7 @@ const sessions: PiSessionSummary[] = [
   { id: 'two', path: '/tmp/two.jsonl', cwd: '/tmp/project-two', title: 'Second thread', firstMessage: 'Second', messageCount: 1, createdAt: 2, modifiedAt: 2 },
 ]
 const workspaceSession: PiSessionSummary = { id: 'three', path: '/tmp/three.jsonl', cwd: '/tmp/project-three', title: '(no messages)', firstMessage: '', messageCount: 0, createdAt: 3, modifiedAt: 3 }
+const deferredSession: PiSessionSummary = { id: 'three-fork', path: '/tmp/three-fork.jsonl', cwd: '/tmp/project-three', title: 'Deferred thread', firstMessage: 'Deferred', messageCount: 1, createdAt: 5, modifiedAt: 5 }
 
 class StaticCatalog extends PiSessionCatalog {
   override async list(): Promise<PiSessionSummary[]> {
@@ -203,6 +204,25 @@ describe('clickable session switching', () => {
       expect(transport.requests.slice(before)).toEqual([])
       expect(controller.getSnapshot().pendingNavigation).toBeUndefined()
       expect(controller.getSnapshot().session.sessionId).toBe('one')
+    } finally {
+      await controller.dispose()
+    }
+  })
+
+  it('lands on the latest session clicked while a transition is in flight', async () => {
+    const transport = new SwitchingTransport()
+    transport.extras = [deferredSession]
+    const controller = new WorkbenchController(transport, '/tmp/project', testControllerDependencies(new StaticCatalog()))
+    try {
+      await controller.start()
+      const release = transport.holdNextSwitch()
+      const first = controller.switchSession(sessions[1]!)
+      const second = controller.switchSession(deferredSession)
+      release()
+      await first
+      await second
+      for (let attempt = 0; attempt < 50 && controller.getSnapshot().session.sessionId !== 'three-fork'; attempt += 1) await Bun.sleep(10)
+      expect(controller.getSnapshot().session.sessionId).toBe('three-fork')
     } finally {
       await controller.dispose()
     }
