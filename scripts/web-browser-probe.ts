@@ -21,7 +21,7 @@ class RecordingPtyBackend implements TerminalBackend {
   readonly #pty = new BunPtyBackend()
 
   async spawn(request: TerminalSpawnRequest & { cols: number; rows: number; cwd: string }): Promise<TerminalProcess> {
-    const process = await this.#pty.spawn({ ...request, shell: '/bin/bash', args: ['--noprofile', '--norc'], env: { ...request.env, PS1: 'HW> ', PS2: '> ' } })
+    const process = await this.#pty.spawn({ ...request, shell: '/bin/bash', args: ['--noprofile', '--norc'], env: { ...request.env, PS1: 'HW> ', PS2: '> ', INPUTRC: '/dev/null' } })
     return {
       ...(process.pid === undefined ? {} : { pid: process.pid }),
       write: (data) => {

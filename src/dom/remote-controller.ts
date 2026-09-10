@@ -16,9 +16,28 @@ export class RemoteWorkbenchController {
   #unsubscribe: () => void
   constructor(client: WorkspaceClient) { this.#client = client; this.#snapshot = materialize(client.getSnapshot().state); this.#unsubscribe = client.subscribe(() => this.#pull()) }
   readonly subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => { this.#listeners.delete(listener) } }
+  readonly subscribeShell = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => { this.#listeners.delete(listener) } }
+  readonly #editorListeners = new Set<() => void>()
+  #editorSnapshot: { editorText: string; editorImages: ComposerImage[] } | undefined
+  readonly subscribeEditor = (listener: () => void): (() => void) => { this.#editorListeners.add(listener); return () => { this.#editorListeners.delete(listener) } }
+  readonly getEditorSnapshot = (): { editorText: string; editorImages: ComposerImage[] } => {
+    if (!this.#editorSnapshot) this.#editorSnapshot = { editorText: this.getSnapshot().editorText, editorImages: this.getSnapshot().editorImages }
+    return this.#editorSnapshot
+  }
   readonly getSnapshot = (): WorkbenchState => { if (!this.#snapshot) throw new Error('Remote workbench is not ready'); return this.#snapshot }
   readonly loadEarlierMessages = async (): Promise<void> => { await this.#send({ type: 'loadEarlierMessages' }) }
-  #pull(): void { const next = materialize(this.#client.getSnapshot().state); if (!next) return; if (this.#snapshot && next.editorText !== this.#snapshot.editorText && next.editorText !== this.#localEditorText) this.#localEditorText = undefined; this.#snapshot = this.#localEditorText === undefined ? next : { ...next, editorText: this.#localEditorText }; for (const listener of this.#listeners) listener() }
+  #pull(): void {
+    const next = materialize(this.#client.getSnapshot().state)
+    if (!next) return
+    if (this.#snapshot && next.editorText !== this.#snapshot.editorText && next.editorText !== this.#localEditorText) this.#localEditorText = undefined
+    this.#snapshot = this.#localEditorText === undefined ? next : { ...next, editorText: this.#localEditorText }
+    const editorSnapshot = this.#editorSnapshot
+    if (editorSnapshot && (editorSnapshot.editorText !== this.#snapshot.editorText || editorSnapshot.editorImages !== this.#snapshot.editorImages)) {
+      this.#editorSnapshot = { editorText: this.#snapshot.editorText, editorImages: this.#snapshot.editorImages }
+      for (const listener of this.#editorListeners) listener()
+    }
+    for (const listener of this.#listeners) listener()
+  }
   #send(command: WorkbenchCommand): Promise<unknown> { return this.#client.send(command).catch((error) => { this.#client.reportError(error); throw error }) }
   notify(kind: NoticeKind, message: string): void { void this.#send({ type: 'notify', kind, message }) }
   async start(): Promise<void> {}
@@ -54,7 +73,15 @@ export class RemoteWorkbenchController {
   async setThinkingLevel(level: ThinkingLevel): Promise<void> { await this.#send({ type: 'setThinkingLevel', level }) }
   async compact(): Promise<void> { await this.#send({ type: 'compact' }) }
   completeUiRequest(id: number): void { void this.#send({ type: 'completeUiRequest', id }) }
-  setEditorText(text: string): void { this.#localEditorText = text; this.#snapshot = { ...this.getSnapshot(), editorText: text }; for (const listener of this.#listeners) listener(); if (this.#editorTimer) clearTimeout(this.#editorTimer); this.#editorTimer = setTimeout(() => { void this.#send({ type: 'setEditorText', text }) }, 200) }
+  setEditorText(text: string): void {
+    this.#localEditorText = text
+    this.#snapshot = { ...this.getSnapshot(), editorText: text }
+    this.#editorSnapshot = { editorText: text, editorImages: this.#snapshot.editorImages }
+    for (const listener of this.#editorListeners) listener()
+    for (const listener of this.#listeners) listener()
+    if (this.#editorTimer) clearTimeout(this.#editorTimer)
+    this.#editorTimer = setTimeout(() => { void this.#send({ type: 'setEditorText', text }) }, 200)
+  }
   addEditorImage(image: ComposerImage): void { void this.#send({ type: 'addEditorImage', image }) }
   removeEditorImage(id: string): void { void this.#send({ type: 'removeEditorImage', id }) }
   dismissNotice(id: number): void { void this.#send({ type: 'dismissNotice', id }) }
