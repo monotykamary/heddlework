@@ -1,5 +1,5 @@
 import React from 'react'
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { connectTest } from '@gpuix/react/automation'
 import { createTestRoot, hasNativeTestRenderer } from '@gpuix/react/testing'
 import { DemoTransport } from '../src/pi/demo-transport.ts'
@@ -7,6 +7,7 @@ import { MemoryTerminalBackend } from '../src/terminal/backend.ts'
 import { TerminalSessionService } from '../src/terminal/service.ts'
 import { WorkbenchApp } from '../src/ui/app.tsx'
 import { TerminalView } from '../src/ui/terminal-view.tsx'
+import { TERMINAL_COPY_FAILED_MESSAGE } from '../src/ui/terminal-copy-feedback.ts'
 import { SPRING_SETTLE_MS } from '../src/ui/motion.ts'
 import { WorkbenchController } from '../src/workbench/controller.ts'
 import { createTestUiRegistry, testControllerDependencies } from './helpers/workbench.ts'
@@ -68,6 +69,84 @@ describeNative('terminal panels', () => {
       expect(terminals.getStateSnapshot()).toBe(stateSnapshot)
       root.renderer.flush()
       expect(root.renderer.getPaintedText()).toContain('x')
+    } finally {
+      root.unmount()
+    }
+  })
+
+  it('routes Ctrl+Shift+C to copy (zero PTY bytes) and plain Ctrl+C to one ETX', async () => {
+    const terminals = new TerminalSessionService({ cwd: '/tmp/heddlework-terminal-ui', backend: new MemoryTerminalBackend() })
+    services.push(terminals)
+    const sessionId = await terminals.spawn({ cols: 80, rows: 24 })
+    const copyInput: string[] = []
+    const writes: string[] = []
+    const originalWrite = terminals.write.bind(terminals)
+    terminals.write = (id: string, data: string) => { writes.push(data); return originalWrite(id, data) }
+    const root = createTestRoot({ width: 800, height: 420 })
+    try {
+      root.render(
+        <TerminalView
+          service={terminals}
+          sessionId={sessionId}
+          placement="bottom"
+          width={800}
+          height={420}
+          appearance="dark"
+          copy={(text) => { copyInput.push(text) }}
+        />,
+      )
+      root.renderer.flush()
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      root.renderer.flush()
+      // Ctrl+Shift+C resolves as a copy command: zero PTY bytes even when the
+      // (empty) copied scope yields an empty payload.
+      expect(writes).toEqual([])
+
+      root.renderer.simulateKeystrokes('ctrl+c')
+      root.renderer.flush()
+      // Plain Ctrl+C remains exactly one interrupt (ETX) write.
+      expect(writes).toEqual([String.fromCharCode(3)])
+
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      root.renderer.flush()
+      // A repeated copy after an interrupt still adds zero PTY bytes.
+      expect(writes).toEqual([String.fromCharCode(3)])
+    } finally {
+      root.unmount()
+    }
+  })
+
+  it('shows the copy failure label when the clipboard writer fails, and clears it on a successful retry', async () => {
+    const terminals = new TerminalSessionService({ cwd: '/tmp/heddlework-terminal-ui', backend: new MemoryTerminalBackend() })
+    services.push(terminals)
+    const sessionId = await terminals.spawn({ cols: 80, rows: 24 })
+    let copyResult: boolean = false
+    const root = createTestRoot({ width: 800, height: 420 })
+    try {
+      root.render(
+        <TerminalView
+          service={terminals}
+          sessionId={sessionId}
+          placement="bottom"
+          width={800}
+          height={420}
+          appearance="dark"
+          copy={() => copyResult}
+        />,
+      )
+      root.renderer.flush()
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      await Bun.sleep(1)
+      root.renderer.flush()
+      // WP-01 repair 2: a failed copy surfaces a local, generic failure label
+      // instead of failing silently (and never writes to the PTY).
+      expect(root.renderer.getPaintedText().some((text) => text.includes(TERMINAL_COPY_FAILED_MESSAGE))).toBe(true)
+
+      copyResult = true
+      root.renderer.simulateKeystrokes('ctrl+shift+c')
+      await Bun.sleep(1)
+      root.renderer.flush()
+      expect(root.renderer.getPaintedText().some((text) => text.includes(TERMINAL_COPY_FAILED_MESSAGE))).toBe(false)
     } finally {
       root.unmount()
     }

@@ -124,3 +124,81 @@ export function wrapBracketedPaste(text: string, enabled: boolean): string {
   if (!enabled) return text
   return ESC + '[200~' + text + ESC + '[201~'
 }
+
+export type TerminalCommand = 'copy' | 'paste' | 'interrupt' | 'none'
+
+/**
+ * Resolve platform copy/paste/interrupt shorthand BEFORE terminal key encoding.
+ *
+ * WP-01 precedence: a copy command must never reach the PTY, even when the
+ * clipboard write fails or the desktop lacks a selected range. Plain Ctrl+C is
+ * retained as exactly one ETX (interrupt); Ctrl+Shift+C (Linux/Windows) and
+ * Command+C (macOS) are copy commands and read zero PTY bytes.
+ */
+export function resolveTerminalCommand(event: TerminalKeyEvent, platform: string): TerminalCommand {
+  const { key, ctrl, alt, cmd, shift } = normalizeTerminalKey(event)
+  if (key === 'c') {
+    if (platform === 'darwin') {
+      if (cmd) return 'copy'
+      if (ctrl && !cmd && !shift && !alt) return 'interrupt'
+      return 'none'
+    }
+    if (ctrl && shift && !alt && !cmd) return 'copy'
+    if (ctrl && !cmd && !shift && !alt) return 'interrupt'
+    return 'none'
+  }
+  if (key === 'v') {
+    if ((cmd || ctrl) && !alt) return 'paste'
+    return 'none'
+  }
+  return 'none'
+}
+
+export interface TerminalKeyGridLike {
+  readonly viewport: readonly { readonly text: string }[]
+  readonly bracketedPaste?: boolean
+  readonly applicationCursor?: boolean
+}
+
+export interface TerminalKeyEffects {
+  readonly platform: string
+  readonly grid: TerminalKeyGridLike | undefined
+  readonly write: (data: string) => void
+  /** Handled copy: the effect consumes the clipboard outcome (including
+   * failures) and reports its own feedback; it never falls back to the PTY. */
+  readonly copy: (text: string) => void | Promise<void>
+  readonly readPaste: () => Promise<string | undefined>
+}
+
+/**
+ * Production terminal key dispatch (WP-01). This is the seam TerminalView.onKeyDown
+ * calls so the exact handler body can be regression-tested without a native
+ * GPUI renderer. Commands are resolved BEFORE terminal encoding: a copy command
+ * never reaches the PTY (zero bytes, even when the clipboard write fails — the
+ * copy effect owns reporting that failure locally), plain Ctrl+C is exactly one
+ * ETX, and ordinary/paste keys keep their previous path.
+ */
+export function dispatchTerminalKey(event: TerminalKeyEvent, effects: TerminalKeyEffects): void {
+  const { grid } = effects
+  const command = resolveTerminalCommand(event, effects.platform)
+  if (command === 'copy') {
+    void effects.copy(grid?.viewport.map((row) => row.text).join('\n') ?? '')
+    return
+  }
+  if (command === 'interrupt') {
+    effects.write(String.fromCharCode(3))
+    return
+  }
+  if (command === 'paste') {
+    // Paste failures stay local like copy failures: a rejected read or a
+    // throwing write must never become an unhandled rejection in the key path.
+    void effects.readPaste().then((text) => {
+      if (!text) return
+      effects.write(wrapBracketedPaste(text, Boolean(grid?.bracketedPaste)))
+    }).catch(() => undefined)
+    return
+  }
+  const encoded = encodeTerminalKey(event, grid?.applicationCursor)
+  if (!encoded) return
+  effects.write(encoded)
+}
