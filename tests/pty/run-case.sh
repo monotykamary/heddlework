@@ -49,12 +49,56 @@ pass() { printf 'PASS(%s): %s\n' "$CASE" "$*"; }
 CASE_HARNESS_ARGS=()
 # One of: menu-default menu-pi hidden-input already-configured ctrl-c
 #         eof-default bun-prompt-decline bun-install-accept auth-write
-#         custom-endpoint custom-endpoint-prompt desktop-launcher
+#         custom-endpoint custom-endpoint-prompt endpoint-check
+#         endpoint-check-fail desktop-launcher
 
 run_steps() { # steps-file extra-env...
   local steps=$1; shift
   env "$@" "$PY" "$REPO/tests/pty/pty-run.py" "$LOG" "$steps" -- \
     sh "$REPO/install.sh" "${CASE_HARNESS_ARGS[@]}"
+}
+
+# Start the OpenAI-compatible stub endpoint on an ephemeral port and resolve
+# $ENDPOINT_URL from it. The installer's connectivity check talks to this
+# instead of a real model server, so both the passing and failing paths can be
+# asserted exactly. Stop it with stop_endpoint (or leave it to the EXIT trap).
+start_endpoint() { # start_endpoint <models> [extra-mock-endpoint-args...]
+  local models=$1; shift
+  ENDPOINT_PORT_FILE="$WORK/endpoint-port"
+  ENDPOINT_LOG="$WORK/endpoint.log"
+  rm -f "$ENDPOINT_PORT_FILE"
+  "$PY" "$REPO/tests/pty/mock-endpoint.py" \
+    --port-file "$ENDPOINT_PORT_FILE" --models "$models" "$@" > "$ENDPOINT_LOG" 2>&1 &
+  ENDPOINT_PID=$!
+  for _ in $(seq 1 50); do
+    [ -s "$ENDPOINT_PORT_FILE" ] && break
+    sleep 0.1
+  done
+  [ -s "$ENDPOINT_PORT_FILE" ] || fail "mock endpoint did not report a port"
+  ENDPOINT_PORT=$(cat "$ENDPOINT_PORT_FILE")
+  ENDPOINT_URL="http://127.0.0.1:$ENDPOINT_PORT/v1"
+}
+
+stop_endpoint() {
+  [ -n "${ENDPOINT_PID:-}" ] && kill "$ENDPOINT_PID" 2>/dev/null
+  ENDPOINT_PID=''
+}
+
+# Capture the exit status of a run that is expected to fail.
+run_failing_steps() { # steps-file extra-env...
+  set +e
+  run_steps "$@"
+  RUN_STATUS=$?
+  set -e
+  [ "$RUN_STATUS" -ne 0 ] || fail "expected a non-zero exit, got 0"
+}
+
+# A port that nothing is listening on: bind the stub, keep its number, stop it.
+dead_port() {
+  start_endpoint "unused-model"
+  DEAD_PORT=$ENDPOINT_PORT
+  stop_endpoint
+  ENDPOINT_URL="http://127.0.0.1:$DEAD_PORT/v1"
 }
 
 # ---------------------------------------------------------------------------
@@ -112,6 +156,11 @@ case "$CASE" in
   # Custom OpenAI-compatible endpoint, environment-driven: --write-model-config
   # is the mode the container entrypoint uses, and it must leave an unrelated
   # provider that is already in models.json untouched.
+  #
+  # Nothing listens on 127.0.0.1:11434 here, which is the case the entrypoint
+  # meets when the server it points at has not started yet: HEDDLEWORK_OPENAI_CHECK
+  # =warn is exactly what it passes, so the config is still written (the passing
+  # check is covered by endpoint-check and custom-endpoint-prompt).
   custom-endpoint)
     CASE_HARNESS_ARGS=(--write-model-config)
     need_real_node custom-endpoint
@@ -122,7 +171,10 @@ case "$CASE" in
     run_steps "$WORK/steps" \
       HEDDLEWORK_OPENAI_BASE_URL="http://127.0.0.1:11434/v1" \
       HEDDLEWORK_OPENAI_MODEL="qwen2.5-coder:7b,llama3.1:8b" \
-      HEDDLEWORK_OPENAI_KEY="sk-custom-ENV-1" || fail "--write-model-config exited non-zero"
+      HEDDLEWORK_OPENAI_KEY="sk-custom-ENV-1" \
+      HEDDLEWORK_OPENAI_CHECK=warn || fail "--write-model-config exited non-zero"
+    grep -q 'writing the endpoint anyway' "$LOG" \
+      || fail "warn mode did not report the unreachable endpoint"
 
     models="$PI_CODING_AGENT_DIR/models.json"
     grep -q '"baseUrl": "http://127.0.0.1:11434/v1"' "$models" || fail "baseUrl missing from models.json"
@@ -138,17 +190,21 @@ case "$CASE" in
 
   # The same endpoint collected interactively: decline every provider prompt,
   # then accept the defaults for provider id and API flavor. The key is entered
-  # through the hidden prompt, so it must never reach the terminal.
+  # through the hidden prompt, so it must never reach the terminal. The URL typed
+  # at the prompt points at the stub endpoint, which also proves the connectivity
+  # check runs on the interactive path (a closed port would abort the install).
   custom-endpoint-prompt)
     CASE_HARNESS_ARGS=(pi)
     need_real_node custom-endpoint-prompt
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
     mkdir -p "$PI_CODING_AGENT_DIR"
     {
       for provider in anthropic openai google xai openrouter groq cerebras mistral deepseek; do
         printf 'WAIT:Configure %s\nENTER\n' "$provider"
       done
       printf 'WAIT:Use a custom OpenAI-compatible base URL\ny\n'
-      printf 'WAIT:Base URL\nhttp://127.0.0.1:11434/v1\n'
+      printf 'WAIT:Base URL\n%s\n' "$ENDPOINT_URL"
       printf 'WAIT:Model ID\nqwen2.5-coder:7b\n'
       printf 'WAIT:Provider ID\nENTER\n'
       printf 'WAIT:API flavor\nENTER\n'
@@ -156,7 +212,10 @@ case "$CASE" in
     } > "$WORK/steps"
     run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=0 || fail "interactive run exited non-zero"
 
-    grep -q 'custom-openai -> http://127.0.0.1:11434/v1 (api: openai-completions' "$LOG" \
+    grep -q "endpoint check: ok" "$LOG" || fail "the prompted endpoint was not checked"
+    grep -q "$ENDPOINT_URL serves all 1 requested model id" "$LOG" \
+      || fail "the prompted endpoint was not reported as verified"
+    grep -q "custom-openai -> $ENDPOINT_URL (api: openai-completions" "$LOG" \
       || fail "prompt did not fall back to the default provider id and API flavor"
     grep -q 'sk-custom-PROMPT-1' "$LOG" && fail "endpoint key echoed to the terminal"
     models="$PI_CODING_AGENT_DIR/models.json"
@@ -164,7 +223,120 @@ case "$CASE" in
     grep -q '"key": "sk-custom-PROMPT-1"' "$PI_CODING_AGENT_DIR/auth.json" || fail "prompted key not stored in auth.json"
     grep -q 'HEDDLEWORK_PROVIDER=custom-openai HEDDLEWORK_MODEL=qwen2.5-coder:7b' "$LOG" \
       || fail "next steps did not show how to launch the custom endpoint"
-    pass "prompt collected the endpoint, kept the key hidden, and printed the launch hint"
+    pass "prompt collected the endpoint, checked it, kept the key hidden, and printed the launch hint"
+    ;;
+
+  # The connectivity check on its passing paths: the model listing answers, a
+  # server without a listing is verified through a one-token chat completion, and
+  # a credential the endpoint accepts is not mistaken for a failure.
+  endpoint-check)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-check
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b,llama3.1:8b"
+    models="$PI_CODING_AGENT_DIR/models.json"
+
+    printf 'WAIT:endpoint check: ok\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL="qwen2.5-coder:7b,llama3.1:8b" \
+      HEDDLEWORK_OPENAI_KEY="sk-check-OK-1" || fail "a reachable endpoint was rejected"
+    grep -q "$ENDPOINT_URL serves all 2 requested model id" "$LOG" \
+      || fail "the model listing was not verified"
+    grep -q 'GET /v1/models' "$ENDPOINT_LOG" || fail "the probe did not request the model listing"
+    grep -q '"id": "llama3.1:8b"' "$models" || fail "models.json missing the verified model ids"
+    grep -q '"key": "sk-check-OK-1"' "$PI_CODING_AGENT_DIR/auth.json" || fail "auth.json missing the key"
+
+    # A key the endpoint rejects must be a failure, not a false pass.
+    stop_endpoint
+    start_endpoint "qwen2.5-coder:7b" --require-key sk-right-1
+    printf 'WAIT:endpoint check: ok\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-right-1 || fail "an accepted credential failed the check"
+
+    # No listing at all: the probe falls back to the route Pi will use.
+    stop_endpoint
+    start_endpoint "qwen2.5-coder:7b" --no-models
+    printf 'WAIT:answered a chat completion\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-check-OK-1 || fail "the chat fallback did not verify the endpoint"
+    grep -q 'trying a one-token chat completion instead' "$LOG" \
+      || fail "the probe did not fall back to a chat completion"
+    grep -q 'POST /v1/chat/completions -> 200' "$ENDPOINT_LOG" || fail "no chat completion was attempted"
+    pass "listing, credential, and listing-less endpoints all verified"
+    ;;
+
+  # Every way the check fails: a model id the server does not serve, a closed
+  # port, and a rejected credential all abort a require-mode install before any
+  # configuration is written, while warn mode writes it and explains. The chat
+  # fallback catches an unknown model id on a server with no listing.
+  endpoint-check-fail)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-check-fail
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    models="$PI_CODING_AGENT_DIR/models.json"
+
+    # An unknown model id is the failure the check exists for: nothing may be
+    # written, so the file must not even exist yet.
+    printf 'WAIT:does not serve: mistral-small:24b\nWAIT:it offers: qwen2.5-coder:7b\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b,mistral-small:24b
+    grep -q 'refusing to write an endpoint' "$LOG" || fail "the failure was not explained"
+    [ -f "$models" ] && fail "a refused endpoint still wrote models.json"
+
+    # warn is the escape hatch used by the container entrypoint: write it and
+    # say what is wrong.
+    printf 'WAIT:writing the endpoint anyway\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b,mistral-small:24b \
+      HEDDLEWORK_OPENAI_CHECK=warn || fail "warn mode should still write the config"
+    grep -q '"id": "mistral-small:24b"' "$models" || fail "warn mode did not write the config"
+
+    # A port with nothing behind it, after the stub bound it and stopped.
+    dead_port
+    printf 'WAIT:cannot reach %s/models\n' "$ENDPOINT_URL" > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b
+    grep -q "cannot reach $ENDPOINT_URL/models" "$LOG" || fail "the unreachable endpoint was not reported"
+    grep -q "$ENDPOINT_URL" "$models" && fail "an unreachable endpoint overwrote models.json"
+
+    # A base URL without a scheme is the same mistake a user makes by hand.
+    printf "WAIT:endpoint check: '127.0.0.1:11434/v1' has no http\n" > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="127.0.0.1:11434/v1" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b
+    grep -q "endpoint check: '127.0.0.1:11434/v1' has no http:// or https:// scheme" "$LOG" \
+      || fail "a schemeless base URL passed the check"
+
+    # A listing-less server: only the chat completion proves the model id, and
+    # its error message is the one a user would otherwise see inside Pi.
+    start_endpoint "qwen2.5-coder:7b" --no-models
+    printf 'WAIT:refused a chat completion\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=nope-1:7b
+    grep -q 'The model `nope-1:7b` does not exist' "$LOG" \
+      || fail "the endpoint's own model error was not surfaced"
+
+    # A key the endpoint rejects is reported as such rather than as a bad URL.
+    stop_endpoint
+    start_endpoint "qwen2.5-coder:7b" --require-key sk-right-1
+    printf 'WAIT:rejected the credential\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-wrong-1
+    grep -q 'HTTP 401' "$LOG" || fail "the rejected credential was not reported"
+    grep -q 'invalid api key' "$LOG" || fail "the endpoint's own auth error was not surfaced"
+    pass "missing model id, closed port, no scheme, and a rejected key all aborted before writing"
     ;;
 
   ctrl-c)

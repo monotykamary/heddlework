@@ -52,7 +52,14 @@ fi
 # a gateway). This reuses the installer's config-only mode, which accepts the
 # same HEDDLEWORK_OPENAI_* variables; the workspace user takes ownership of the
 # files afterwards so they stay editable inside the container.
+#
+# The endpoint is probed but never fatal here: the server it points at often
+# starts after the container does (or lives on the host behind
+# host.docker.internal), and a container that refuses to boot is worse than a
+# logged warning. Set HEDDLEWORK_OPENAI_CHECK=require to make it fatal anyway.
 if [ -n "${HEDDLEWORK_OPENAI_BASE_URL:-}" ]; then
+  HEDDLEWORK_OPENAI_CHECK=${HEDDLEWORK_OPENAI_CHECK:-warn}
+  export HEDDLEWORK_OPENAI_CHECK
   if sh /opt/heddlework/install.sh --write-model-config; then
     [ "$(id -u)" = "0" ] && chown "${HOST_UID:-1000}:${HOST_GID:-1000}" "$AGENT_DIR"/*.json 2>/dev/null || true
   else

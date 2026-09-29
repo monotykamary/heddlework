@@ -49,6 +49,7 @@ jobs:
             -e HEDDLEWORK_OPENAI_BASE_URL=http://host.docker.internal:11434/v1 \
             -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
             -e HEDDLEWORK_OPENAI_KEY=sk-ci-custom \
+            -e HEDDLEWORK_OPENAI_CHECK=warn \
             heddlework:ci
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:4817/health | grep -q '"ok":true'; then
@@ -76,6 +77,41 @@ jobs:
           docker exec hw-ci grep -q 'CUSTOM_OPENAI_API_KEY' /state/pi/agent/models.json
           docker exec hw-ci grep -q 'sk-ci-custom' /state/pi/agent/auth.json
           docker exec hw-ci sh -c 'test "$(stat -c %a /state/pi/agent/models.json)" = 600'
+          # The entrypoint probes the endpoint as well: nothing listens on the
+          # CI host, so warn mode must log it and boot regardless — which the
+          # health check above already proved.
+          docker logs hw-ci 2>&1 | grep -q 'endpoint check: cannot reach'
+      - name: Verify the endpoint check rejects a bad base URL
+        run: |
+          # The installer's config-only mode is what the entrypoint runs, so a
+          # closed port proves the check in the same place it would fire for a
+          # user: require (the installer default) must refuse before writing
+          # anything, warn must write the config and say why.
+          bad='http://127.0.0.1:9/v1'
+          log=$(mktemp)
+          if docker exec \
+            -e HEDDLEWORK_OPENAI_BASE_URL="$bad" \
+            -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+            -e HEDDLEWORK_OPENAI_CHECK=require \
+            hw-ci sh /opt/heddlework/install.sh --write-model-config > "$log" 2>&1; then
+            cat "$log"
+            echo "require mode accepted an unreachable endpoint" >&2
+            exit 1
+          fi
+          grep -q "cannot reach $bad/models" "$log"
+          grep -q 'refusing to write an endpoint' "$log"
+          # A refused check must leave the previous config untouched.
+          docker exec hw-ci grep -q 'host.docker.internal:11434/v1' /state/pi/agent/models.json
+
+          warn_log=$(mktemp)
+          docker exec \
+            -e HEDDLEWORK_OPENAI_BASE_URL="$bad" \
+            -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+            -e HEDDLEWORK_OPENAI_CHECK=warn \
+            hw-ci sh /opt/heddlework/install.sh --write-model-config > "$warn_log" 2>&1
+          grep -q "cannot reach $bad/models" "$warn_log"
+          grep -q 'writing the endpoint anyway' "$warn_log"
+          docker exec hw-ci grep -q "$bad" /state/pi/agent/models.json
       - name: Exercise the pairing protocol (unauthenticated and authenticated)
         run: |
           # The web client must be served and the WebSocket endpoint must reject

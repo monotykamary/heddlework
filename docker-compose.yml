@@ -33,6 +33,9 @@ services:
       HEDDLEWORK_OPENAI_API: ${HEDDLEWORK_OPENAI_API:-openai-completions}
       HEDDLEWORK_OPENAI_NAME: ${HEDDLEWORK_OPENAI_NAME:-custom-openai}
       HEDDLEWORK_OPENAI_KEY: ${HEDDLEWORK_OPENAI_KEY:-}
+      # The endpoint is probed at startup; warn (default here) logs a bad URL or
+      # model id instead of refusing to boot, require makes it fatal, off skips.
+      HEDDLEWORK_OPENAI_CHECK: ${HEDDLEWORK_OPENAI_CHECK:-warn}
       # API keys are read by Pi at runtime; pass only what you use.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

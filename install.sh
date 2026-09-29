@@ -9,7 +9,8 @@
 # Honors: NO_COLOR=1, HEDDLEWORK_NONINTERACTIVE=1, HEDDLEWORK_PI, HEDDLEWORK_PROVIDER,
 #         HEDDLEWORK_MODEL, HEDDLEWORK_SKIP_PROVIDERS=1, HEDDLEWORK_SKIP_SETUP=1,
 #         HEDDLEWORK_OPENAI_BASE_URL, HEDDLEWORK_OPENAI_MODEL, HEDDLEWORK_OPENAI_API,
-#         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY.
+#         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY, HEDDLEWORK_OPENAI_CHECK,
+#         HEDDLEWORK_OPENAI_CHECK_TIMEOUT.
 #
 #   ./install.sh --write-model-config   # write models.json from the
 #                                       # HEDDLEWORK_OPENAI_* variables and exit
@@ -204,6 +205,223 @@ write_models_entry() { # write_models_entry <provider> <base-url> <api> <api-key
   chmod 600 "$MODELS_FILE" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# Endpoint connectivity check
+#
+# A typo in the base URL or a model id the server does not serve would stay
+# invisible until the first prompt inside Pi, where it reads like a provider
+# outage. This probe asks the same question up front: GET <base-url>/models —
+# the OpenAI-compatible listing Ollama, LM Studio, vLLM, LiteLLM, and most
+# gateways implement — and, for a server that exposes no listing, a one-token
+# POST to <base-url>/chat/completions.
+#
+# HEDDLEWORK_OPENAI_CHECK decides what a failed probe means: require (default)
+# aborts before anything is written, warn writes the configuration and explains
+# the problem, off skips the probe. Only openai-* flavors are probed, because
+# Anthropic, Bedrock, and Vertex endpoints do not answer these routes.
+# ---------------------------------------------------------------------------
+ENDPOINT_TIMEOUT=${HEDDLEWORK_OPENAI_CHECK_TIMEOUT:-10}
+ENDPOINT_BODY_FILE=''
+ENDPOINT_ERROR_FILE=''
+ENDPOINT_AUTH_HEADER=''
+
+# curl when present, wget otherwise; a slim host with neither reports a skipped
+# check rather than failing the install.
+http_client() {
+  if command -v curl >/dev/null 2>&1; then
+    printf 'curl'
+  elif command -v wget >/dev/null 2>&1; then
+    printf 'wget'
+  else
+    return 1
+  fi
+}
+
+# http_request <client> <url> [json-body] -> prints the HTTP status code, or 000
+# when the request never completed. Response body lands in $ENDPOINT_BODY_FILE
+# and the transport error in $ENDPOINT_ERROR_FILE; $ENDPOINT_AUTH_HEADER carries
+# the credential. Timeouts keep a black-holed endpoint from hanging the install.
+http_request() {
+  request_client=$1
+  request_url=$2
+  request_body=${3:-}
+  : > "$ENDPOINT_BODY_FILE"
+  : > "$ENDPOINT_ERROR_FILE"
+  if [ "$request_client" = curl ]; then
+    set -- -sS -o "$ENDPOINT_BODY_FILE" -w '%{http_code}' \
+      --connect-timeout 5 --max-time "$ENDPOINT_TIMEOUT"
+    [ -n "$ENDPOINT_AUTH_HEADER" ] && set -- "$@" -H "$ENDPOINT_AUTH_HEADER"
+    if [ -n "$request_body" ]; then
+      set -- "$@" -H 'Content-Type: application/json' -X POST --data "$request_body"
+    fi
+    # curl exits non-zero on a transport failure after already printing the 000
+    # status, so the code is read from stdout either way.
+    curl "$@" "$request_url" 2>"$ENDPOINT_ERROR_FILE" || true
+  else
+    # wget has no --write-out; --server-response prints the status line to
+    # stderr, which is where the code is recovered from.
+    set -- -q -O "$ENDPOINT_BODY_FILE" --server-response \
+      --timeout="$ENDPOINT_TIMEOUT" --tries=1
+    [ -n "$ENDPOINT_AUTH_HEADER" ] && set -- "$@" --header "$ENDPOINT_AUTH_HEADER"
+    if [ -n "$request_body" ]; then
+      set -- "$@" --header 'Content-Type: application/json' --post-data "$request_body"
+    fi
+    wget "$@" "$request_url" 2>"$ENDPOINT_ERROR_FILE" || true
+    request_code=$(sed -n 's/^[[:space:]]*HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$ENDPOINT_ERROR_FILE" | tail -n 1) || true
+    printf '%s' "${request_code:-000}"
+  fi
+}
+
+# endpoint_error_message — the API's own explanation, when it sent one
+endpoint_error_message() {
+  grep -o '"message"[[:space:]]*:[[:space:]]*"[^"]*"' "$ENDPOINT_BODY_FILE" 2>/dev/null \
+    | head -n 1 | cut -d'"' -f4 || true
+}
+
+# endpoint_offered_models — the ids the response advertises, space-separated
+endpoint_offered_models() {
+  tr -d ' \t\r\n' < "$ENDPOINT_BODY_FILE" \
+    | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -n 12 | tr '\n' ' ' || true
+}
+
+# probe_custom_endpoint <base-url> <api> <model-ids> [key]
+#   0 verified, 1 reached but broken, 2 not checked
+probe_custom_endpoint() {
+  probe_body=$(mktemp "${TMPDIR:-/tmp}/heddlework-endpoint-body.XXXXXX") || return 2
+  probe_error=$(mktemp "${TMPDIR:-/tmp}/heddlework-endpoint-error.XXXXXX") \
+    || { rm -f "$probe_body"; return 2; }
+  ENDPOINT_BODY_FILE=$probe_body
+  ENDPOINT_ERROR_FILE=$probe_error
+  # `|| capture` keeps a failed probe from tripping `set -e` here.
+  probe_status=''
+  probe_endpoint "$@" || probe_status=$?
+  rm -f "$probe_body" "$probe_error"
+  ENDPOINT_BODY_FILE=''
+  ENDPOINT_ERROR_FILE=''
+  return "${probe_status:-0}"
+}
+
+probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key]
+  probe_base=$1
+  probe_api=$2
+  probe_models=$3
+  probe_key=${4:-}
+
+  case "$probe_api" in
+    openai-*) ;;
+    *)
+      info "endpoint check: skipped — only OpenAI-compatible flavors expose the routes this check uses (api: $probe_api)"
+      return 2
+      ;;
+  esac
+
+  if ! probe_client=$(http_client); then
+    info "endpoint check: skipped — neither curl nor wget is installed"
+    return 2
+  fi
+
+  # A missing scheme is what the caller warns about; here it is decisive, since
+  # there is nothing to contact and Pi would build the same broken request.
+  case "$probe_base" in
+    http://*|https://*) ;;
+    *)
+      warn "endpoint check: '$probe_base' has no http:// or https:// scheme"
+      return 1
+      ;;
+  esac
+
+  # Trailing slashes would double up in "$base/models".
+  probe_base=$(printf '%s' "$probe_base" | sed 's:/*$::')
+  ENDPOINT_AUTH_HEADER=''
+  [ -n "$probe_key" ] && ENDPOINT_AUTH_HEADER="Authorization: Bearer $probe_key"
+
+  probe_code=$(http_request "$probe_client" "$probe_base/models")
+  case "$probe_code" in
+    2*)
+      # The listing is JSON; matching is done on a whitespace-stripped copy so a
+      # fixed-string search works for both "id": "x" and "id":"x" without jq.
+      probe_compact=$(tr -d ' \t\r\n' < "$ENDPOINT_BODY_FILE")
+      probe_remaining=$probe_models
+      probe_missing=''
+      probe_found=0
+      while [ -n "$probe_remaining" ]; do
+        case "$probe_remaining" in
+          *,*) probe_id=${probe_remaining%%,*}; probe_remaining=${probe_remaining#*,} ;;
+          *)   probe_id=$probe_remaining; probe_remaining='' ;;
+        esac
+        probe_id=$(printf '%s' "$probe_id" | tr -d ' \t')
+        [ -n "$probe_id" ] || continue
+        if printf '%s' "$probe_compact" | grep -Fq "\"id\":\"$probe_id\""; then
+          probe_found=$((probe_found + 1))
+        else
+          probe_missing="$probe_missing $probe_id"
+        fi
+      done
+      if [ -z "$probe_missing" ]; then
+        info "endpoint check: ok — $probe_base serves all $probe_found requested model id(s)"
+        return 0
+      fi
+      warn "endpoint check: $probe_base does not serve:$probe_missing"
+      probe_offered=$(endpoint_offered_models | sed 's/ *$//')
+      if [ -n "$probe_offered" ]; then
+        warn "endpoint check: it offers: $probe_offered"
+      else
+        warn "endpoint check: it advertised no model ids at all"
+      fi
+      return 1
+      ;;
+    401|403)
+      warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)" ;;
+    000)
+      warn "endpoint check: cannot reach $probe_base/models — $(head -n 1 "$ENDPOINT_ERROR_FILE")" ;;
+    *)
+      # No model listing (some gateways only implement chat): ask the route Pi
+      # will actually use, with the smallest possible completion.
+      info "endpoint check: $probe_base/models answered HTTP $probe_code; trying a one-token chat completion instead"
+      probe_first=$(printf '%s' "$probe_models" | cut -d, -f1 | tr -d ' \t')
+      probe_json='{"model":"'"$probe_first"'","messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}'
+      probe_code=$(http_request "$probe_client" "$probe_base/chat/completions" "$probe_json")
+      case "$probe_code" in
+        2*) info "endpoint check: ok — $probe_base answered a chat completion for $probe_first"; return 0 ;;
+        401|403) warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)" ;;
+        000) warn "endpoint check: cannot reach $probe_base/chat/completions — $(head -n 1 "$ENDPOINT_ERROR_FILE")" ;;
+        *)
+          probe_detail=$(endpoint_error_message)
+          warn "endpoint check: $probe_base refused a chat completion for $probe_first (HTTP $probe_code)${probe_detail:+: $probe_detail}" ;;
+      esac
+      return 1
+      ;;
+  esac
+  # Reached, but not usable: the response body usually says why.
+  probe_detail=$(endpoint_error_message)
+  [ -n "$probe_detail" ] && warn "endpoint check: the endpoint said: $probe_detail"
+  return 1
+}
+
+# run_endpoint_check <base-url> <api> <model-ids> <key> — applies
+# HEDDLEWORK_OPENAI_CHECK to the probe result; only a confirmed failure in
+# require mode stops the install, and it does so before anything is written.
+run_endpoint_check() {
+  check_mode=${HEDDLEWORK_OPENAI_CHECK:-require}
+  case "$check_mode" in
+    off|no|0) info "HEDDLEWORK_OPENAI_CHECK=$check_mode — writing the endpoint without testing it"; return 0 ;;
+    require|yes|1|warn) ;;
+    *) warn "unknown HEDDLEWORK_OPENAI_CHECK='$check_mode' (expected require, warn, or off); treating it as require"; check_mode=require ;;
+  esac
+
+  check_status=''
+  probe_custom_endpoint "$@" || check_status=$?
+  case "${check_status:-0}" in
+    0|2) return 0 ;;
+  esac
+
+  if [ "$check_mode" = warn ]; then
+    warn "writing the endpoint anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt while it stays unreachable"
+    return 0
+  fi
+  die "refusing to write an endpoint that failed its check — fix the base URL or model id, start the server, or set HEDDLEWORK_OPENAI_CHECK=warn to write it anyway"
+}
+
 write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model-ids> [key]
   custom_name=$1
   custom_base_url=$2
@@ -216,21 +434,37 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
     *) warn "$custom_base_url has no http:// or https:// scheme; Pi appends request paths to it" ;;
   esac
 
+  # Resolving the credential first lets the check use exactly what Pi will send,
+  # and keeps a failed check from leaving a half-configured endpoint behind.
   if [ -n "$custom_key" ]; then
-    # Pi resolves a stored credential by provider id, so the secret lives in
-    # auth.json. models.json only references an environment variable, which keeps
-    # the same endpoint usable where there is no auth.json (CI, containers).
-    write_auth_entry "$custom_name" "$custom_key"
-    custom_key_ref='${'"$(provider_env_name "$custom_name")"'}'
+    custom_key_ref='${'"$(provider_env_name "$custom_name")"'}';
+    custom_probe_key=$custom_key
   elif [ -n "${OPENAI_API_KEY:-}" ]; then
-    # A gateway fronting the same protocol usually reuses the OpenAI key.
-    write_auth_entry "$custom_name" "$OPENAI_API_KEY"
     custom_key_ref='${OPENAI_API_KEY}'
+    custom_probe_key=$OPENAI_API_KEY
   else
     # Local servers ignore credentials, but a missing key hides the models from
     # /model, so a literal placeholder keeps them selectable.
     custom_key_ref='local'
+    custom_probe_key='local'
   fi
+
+  run_endpoint_check "$custom_base_url" "$custom_api" "$custom_models" "$custom_probe_key"
+
+  case "$custom_key_ref" in
+    local) ;;
+    *)
+      # Pi resolves a stored credential by provider id, so the secret lives in
+      # auth.json. models.json only references an environment variable, which
+      # keeps the same endpoint usable where there is no auth.json (CI, containers).
+      if [ -n "$custom_key" ]; then
+        write_auth_entry "$custom_name" "$custom_key"
+      else
+        # A gateway fronting the same protocol usually reuses the OpenAI key.
+        write_auth_entry "$custom_name" "$OPENAI_API_KEY"
+      fi
+      ;;
+  esac
 
   write_models_entry "$custom_name" "$custom_base_url" "$custom_api" "$custom_key_ref" "$custom_models"
   CUSTOM_ENDPOINT_NAME=$custom_name
@@ -412,6 +646,11 @@ Custom OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, LiteLLM, a gateway):
   HEDDLEWORK_OPENAI_NAME        provider id to create (default custom-openai)
   HEDDLEWORK_OPENAI_KEY         key for the endpoint; defaults to OPENAI_API_KEY,
                                 otherwise to a placeholder local servers ignore
+  HEDDLEWORK_OPENAI_CHECK       require (default) aborts the install when the
+                                endpoint is unreachable, rejects the key, or does
+                                not serve the given model id; warn writes the
+                                config anyway; off skips the check
+  HEDDLEWORK_OPENAI_CHECK_TIMEOUT  seconds to wait for the endpoint (default 10)
 
 Examples:
   ./install.sh                    # interactive menu
