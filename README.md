@@ -68,7 +68,7 @@ Heddlework currently launches Pi as an RPC sidecar. The transport boundary in `s
 
 Requirements:
 
-- [Bun](https://bun.sh) 1.3+
+- [Bun](https://bun.sh) 1.4.0+ (stable; 1.4.0 is the CI-tested baseline for the current lockfile)
 - a working `pi` executable on `PATH`
 - a platform supported by GPUIX: macOS, Linux, or Windows
 
@@ -108,6 +108,8 @@ bun run build
 ./install.sh heddle     # Heddlework + Pi (native desktop; builds GPUIX, needs Rust)
 ./install.sh pi         # Pi + Fabric (plain TUI; needs only Node.js)
 ```
+
+The Heddlework path checks the Bun version before installing workspace dependencies. Missing or unsupported Bun requires an explicitly accepted install/upgrade; non-interactive runs stop with upgrade instructions. The Pi-only path does not require Bun.
 
 The first menu option compiles the pinned GPUIX runtime and Heddlework itself; the second installs `pi` and `pi-fabric` and stops there. Either path offers each known provider in turn and stores the key in `~/.pi/agent/auth.json` with hidden input, owner-only (`0600`) permissions, and terminal echo restored if the entry is interrupted. Non-interactive runs (`HEDDLEWORK_NONINTERACTIVE=1`) never prompt: they copy provider keys out of the environment instead. Run `./install.sh --help` for every flag and variable. Interactive prompts are covered by a real-PTY harness; see [Installer PTY harness](tests/pty/README.md).
 

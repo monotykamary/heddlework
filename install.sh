@@ -74,20 +74,31 @@ need_node() {
   return 1
 }
 
+bun_is_supported() {
+  bun_version=$(bun --version 2>/dev/null) || return 1
+  # Stable Bun 1.4.0+ matches the CI baseline and reads the checked-in lockfile.
+  printf '%s\n' "$bun_version" | awk -F. '{
+    exit !($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ && ($1 > 1 || ($1 == 1 && $2 >= 4)))
+  }'
+}
+
 need_bun() {
-  command -v bun >/dev/null 2>&1 && return 0
-  info "Bun 1.3+ is required to build Heddlework"
+  bun_is_supported && return 0
+  info "Bun 1.4.0+ (stable) is required to build Heddlework; detected: ${bun_version:-not found}"
   if is_interactive; then
-    printf 'Install Bun now (curl -fsSL https://bun.sh/install | bash)? [y/N] '
-    read -r answer
+    printf 'Install or upgrade Bun now (curl -fsSL https://bun.sh/install | bash)? [y/N] '
+    read -r answer || answer=''
     case "$answer" in
       y|Y|yes|YES)
-        curl -fsSL https://bun.sh/install | bash
-        export PATH="$HOME/.bun/bin:$PATH"
-        command -v bun >/dev/null 2>&1 && return 0 ;;
+        if curl -fsSL https://bun.sh/install | bash; then
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun_is_supported && return 0
+        fi
+        warn "Bun installation did not provide a supported version; detected: ${bun_version:-not found}"
+        ;;
     esac
   fi
-  warn "install Bun from https://bun.sh"
+  warn "install Bun 1.4.0 or newer from https://bun.sh, ensure it is on PATH, then rerun this installer"
   return 1
 }
 

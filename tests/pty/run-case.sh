@@ -13,15 +13,14 @@ PY=/usr/bin/python3
 export PI_CODING_AGENT_DIR="$WORK/pi-agent"
 export HEDDLEWORK_SKIP_SETUP=1
 export HEDDLEWORK_NONINTERACTIVE=0
-export PATH="$REPO/tests/pty:$PATH"
-unset ANTHROPIC_API_KEY OPENAI_API_KEY || true
+export HOME="$WORK/home"
+mkdir -p "$HOME"
 # The WSL sandbox has no Node; `need_node` only checks availability, so a
 # mock keeps the pi-harness path reachable. Writing auth.json falls back to
 # node, which must therefore also resolve (mock-pi handles any argv).
 mkdir -p "$WORK/bin"
 ln -sf "$REPO/tests/pty/mock-pi.sh" "$WORK/bin/pi"
 ln -sf "$REPO/tests/pty/mock-pi.sh" "$WORK/bin/node"
-export PATH="$WORK/bin:$PATH"
 
 # The mocked `node` on PATH keeps `need_node` satisfied on machines that have no
 # Node at all, but it cannot evaluate the installer's JSON writer. Resolve one
@@ -31,10 +30,20 @@ export PATH="$WORK/bin:$PATH"
 if [ -n "${PTY_REAL_NODE:-}" ]; then
   :
 else
-  PTY_REAL_NODE=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx -- "$WORK/bin" | tr '\n' ':' | sed 's/:$//') \
-    command -v node 2>/dev/null || true)
+  PTY_REAL_NODE=$(command -v node 2>/dev/null || true)
   [ -n "$PTY_REAL_NODE" ] && [ -x "$PTY_REAL_NODE" ] && export PTY_REAL_NODE || PTY_REAL_NODE=''
 fi
+
+# Do not inherit a real Bun, package manager, curl, or Pi from the host. Only
+# these utilities and the case's explicit mocks are visible to the installer.
+for utility in awk bash basename cat chmod cmp cp cut dirname env grep head install ln mkdir sed sh stat stty tr uname; do
+  ln -s "$(command -v "$utility")" "$WORK/bin/$utility"
+done
+export PATH="$WORK/bin"
+export BUN_LOG="$WORK/bun.log"
+export CURL_LOG="$WORK/curl.log"
+: > "$BUN_LOG"
+: > "$CURL_LOG"
 
 need_real_node() { # need_real_node <case>
   if [ -z "${PTY_REAL_NODE:-}" ]; then
@@ -53,8 +62,25 @@ CASE_HARNESS_ARGS=()
 
 run_steps() { # steps-file extra-env...
   local steps=$1; shift
-  env "$@" "$PY" "$REPO/tests/pty/pty-run.py" "$LOG" "$steps" -- \
+  env -i HOME="$HOME" PATH="$PATH" NO_COLOR=1 \
+    PI_CODING_AGENT_DIR="$PI_CODING_AGENT_DIR" \
+    HEDDLEWORK_SKIP_SETUP=1 HEDDLEWORK_NONINTERACTIVE=0 \
+    BUN_LOG="$BUN_LOG" CURL_LOG="$CURL_LOG" \
+    "$@" "$PY" "$REPO/tests/pty/pty-run.py" "$LOG" "$steps" -- \
     sh "$REPO/install.sh" "${CASE_HARNESS_ARGS[@]}"
+}
+
+mock_bun() { # executable-path version
+  cat > "$1" <<'STUB'
+#!/bin/sh
+if [ "$1" = '--version' ]; then
+  cat "$0.version"
+else
+  printf '%s\n' "$*" >> "${BUN_LOG:?}"
+fi
+STUB
+  printf '%s\n' "$2" > "$1.version"
+  chmod 755 "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -199,9 +225,9 @@ case "$CASE" in
   bun-prompt-decline)
     CASE_HARNESS_ARGS=()
     # Decline the Bun install at the heddle path's need_bun prompt.
-    printf 'WAIT:Choose [1/2\nENTER\nWAIT:Bun 1.3\nENTER\n' > "$WORK/steps"
+    printf 'WAIT:Choose [1/2\nENTER\nWAIT:Bun now\nENTER\n' > "$WORK/steps"
     run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=1 || true
-    grep -aq 'install Bun from https://bun.sh' "$LOG" || fail "decline did not warn"
+    grep -aq 'install Bun 1.4.0 or newer from https://bun.sh' "$LOG" || fail "decline did not warn"
     grep -aq 'Bun is required for the Heddlework harness' "$LOG" || fail "installer did not stop after decline"
     # The prompt itself mentions curl; a real invocation echoes `curl-mock:`.
     grep -aq 'curl-mock:' "$LOG" && fail "installer ran curl after decline"
@@ -212,7 +238,7 @@ case "$CASE" in
     CASE_HARNESS_ARGS=()
     # Accept the Bun install with a mocked curl (records the invocation and
     # exits 0); bun remains absent, so the flow then stops with the usual error.
-    printf 'WAIT:Choose [1/2\nENTER\nWAIT:Bun 1.3\ny\n' > "$WORK/steps"
+    printf 'WAIT:Choose [1/2\nENTER\nWAIT:Bun now\ny\n' > "$WORK/steps"
     cat > "$WORK/bin/curl" <<'STUB'
 #!/bin/sh
 echo "curl-mock: $*" >> "${CURL_LOG:?}"
@@ -226,6 +252,92 @@ STUB
     else
       fail "accepting the prompt did not run the Bun installer"
     fi
+    ;;
+
+  bun-missing|bun-unsupported|bun-supported)
+    CASE_HARNESS_ARGS=(heddle)
+    : > "$WORK/steps"
+    case "$CASE" in
+      bun-missing) versions='missing' ;;
+      bun-unsupported) versions='1.3.14 1.3.99 0.99.0 1.4.0-canary invalid' ;;
+      bun-supported) versions='1.4.0 1.4.1 1.10.0 2.0.0' ;;
+    esac
+    for version in $versions; do
+      [ "$version" = missing ] || mock_bun "$WORK/bin/bun" "$version"
+      : > "$BUN_LOG"
+      status=0
+      run_steps "$WORK/steps" HEDDLEWORK_NONINTERACTIVE=1 HEDDLEWORK_SKIP_PROVIDERS=1 || status=$?
+      if [ "$CASE" = bun-supported ]; then
+        [ "$status" -eq 0 ] || fail "$version was rejected"
+        grep -qx 'install --frozen-lockfile' "$BUN_LOG" || fail "$version did not install dependencies"
+        grep -qx 'run build' "$BUN_LOG" || fail "$version did not build"
+      else
+        [ "$status" -ne 0 ] || fail "$version was accepted"
+        grep -q 'Bun 1.4.0' "$LOG" || fail "required version not reported"
+        [ "$version" = missing ] || grep -q "$version" "$LOG" || fail "detected version not reported"
+        [ ! -s "$BUN_LOG" ] || fail "build reached with $version"
+        grep -q 'Install.*Bun now' "$LOG" && fail "non-interactive run prompted"
+      fi
+    done
+    pass "Bun version gate: $versions"
+    ;;
+
+  bun-upgrade-decline|bun-upgrade-failed|bun-upgrade-accept)
+    CASE_HARNESS_ARGS=(heddle)
+    mock_bun "$WORK/bin/bun" 1.3.14
+    cat > "$WORK/bin/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "${CURL_LOG:?}"
+if [ "${UPGRADE_FAIL:-0}" = 1 ]; then
+  printf 'exit 1\n'
+elif [ -n "${UPGRADE_BUN:-}" ]; then
+  cat <<'INSTALL'
+mkdir -p "$HOME/.bun/bin"
+cp "$UPGRADE_BUN" "$HOME/.bun/bin/bun"
+cp "$UPGRADE_BUN.version" "$HOME/.bun/bin/bun.version"
+INSTALL
+fi
+STUB
+    chmod 755 "$WORK/bin/curl"
+    if [ "$CASE" = bun-upgrade-decline ]; then
+      printf 'WAIT:Bun now\nENTER\n' > "$WORK/steps"
+      status=0
+      run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=1 || status=$?
+      [ "$status" -ne 0 ] || fail "declining upgrade exited successfully"
+      [ ! -s "$CURL_LOG" ] || fail "upgrade ran without consent"
+      [ ! -s "$BUN_LOG" ] || fail "build reached with old Bun"
+    else
+      printf 'WAIT:Bun now\ny\n' > "$WORK/steps"
+      # A successful installer exit alone is not enough: it may leave the old
+      # binary in place. Exercise that, a nonzero installer, and an old install.
+      if [ "$CASE" = bun-upgrade-failed ]; then upgrades='unchanged failed old'; else upgrades='supported'; fi
+      for upgrade in $upgrades; do
+        : > "$BUN_LOG"
+        : > "$CURL_LOG"
+        target=''
+        failed=0
+        case "$upgrade" in
+          failed) failed=1 ;;
+          old|supported)
+            version=1.3.14
+            [ "$upgrade" = old ] || version=1.4.0
+            mock_bun "$WORK/upgrade-bun" "$version"
+            target="$WORK/upgrade-bun"
+            ;;
+        esac
+        status=0
+        run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=1 UPGRADE_BUN="$target" UPGRADE_FAIL="$failed" || status=$?
+        [ -s "$CURL_LOG" ] || fail "accepted upgrade was not attempted"
+        if [ "$upgrade" = supported ]; then
+          [ "$status" -eq 0 ] || fail "supported upgrade was rejected"
+          grep -qx 'run build' "$BUN_LOG" || fail "upgraded Bun did not build"
+        else
+          [ "$status" -ne 0 ] || fail "$upgrade upgrade was accepted"
+          [ ! -s "$BUN_LOG" ] || fail "build reached after $upgrade upgrade"
+        fi
+      done
+    fi
+    pass "$CASE preserves the consent and version checks"
     ;;
 
   # The desktop launcher installer is non-interactive, but running it under a
@@ -279,7 +391,7 @@ FAKE
     CASE_HARNESS_ARGS=()
     # EOF (Ctrl-D) at the menu read returns the default harness. Afterwards
     # the heddle path continues into the Bun prompt, where EOF again exits.
-    printf 'WAIT:Choose [1/2\nEOF\nWAIT:Bun 1.3\nEOF\n' > "$WORK/steps"
+    printf 'WAIT:Choose [1/2\nEOF\nWAIT:Bun now\nEOF\n' > "$WORK/steps"
     run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=1 || true
     grep -aq 'harness: .*heddle' "$LOG" || fail "EOF at menu did not fall back to heddle"
     pass "EOF at the menu fell back to the default harness"
@@ -293,4 +405,3 @@ esac
 # The transcript directory is kept for post-mortem inspection:
 #   /tmp/heddlework-pty-<case>/transcript.log
 printf 'transcript: %s\n' "$LOG"
-
