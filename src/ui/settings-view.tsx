@@ -159,12 +159,13 @@ function TerminalSettings({ service }: { service: TerminalSessionService }) {
   )
 }
 
-function TerminalFontControl({ value, testId, onApply }: { value: string; testId: string; onApply(value: string): void }) {
+export function TerminalFontControl({ value, testId, onApply }: { value: string; testId: string; onApply(value: string): void }) {
   const [draft, setDraft] = useState(value)
+  const { mobile } = useResponsiveLayout()
   useEffect(() => setDraft(value), [value])
   const next = draft.trim()
   return (
-    <div style={{ width: '100%', maxWidth: 360, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    <div testId="terminal-font-control" style={{ width: mobile ? '100%' : 360, maxWidth: 360, display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
       <div style={{ width: 0, minWidth: 0, height: 32, flexGrow: 1, display: 'flex', alignItems: 'center', paddingLeft: 9, paddingRight: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.input }}>
         <input testId={testId} value={draft} theme={{ caret: colors.text, text: colors.text, textMuted: colors.textFaint, bg: colors.transparent }} style={{ width: 0, minWidth: 0, height: 28, flexGrow: 1, borderWidth: 0, backgroundColor: colors.transparent, color: colors.text, fontSize: 10, fontFamily: draft || nativeTheme.fontMono }} onChange={(event) => setDraft(String(event.value ?? ''))} onKeyDown={(event) => { if (event.key === 'enter' && next) onApply(next) }} />
       </div>
