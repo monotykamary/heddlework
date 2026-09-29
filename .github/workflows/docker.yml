@@ -112,6 +112,37 @@ jobs:
           grep -q "cannot reach $bad/models" "$warn_log"
           grep -q 'writing the endpoint anyway' "$warn_log"
           docker exec hw-ci grep -q "$bad" /state/pi/agent/models.json
+      - name: Verify HTTP Basic auth from the entrypoint variables
+        run: |
+          # A proxy in front of the endpoint usually asks for a username and
+          # password instead of a key. Pi cannot send Basic through apiKey, so
+          # the credential must land in models.json as an Authorization header,
+          # with the placeholder key left in place to keep the model selectable.
+          expected=$(printf '%s' 'ci-user:ci-pass' | base64 -w0)
+          docker exec \
+            -e HEDDLEWORK_OPENAI_BASE_URL=http://127.0.0.1:9/v1 \
+            -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+            -e HEDDLEWORK_OPENAI_USERNAME=ci-user \
+            -e HEDDLEWORK_OPENAI_PASSWORD=ci-pass \
+            -e HEDDLEWORK_OPENAI_CHECK=warn \
+            hw-ci sh /opt/heddlework/install.sh --write-model-config
+          docker exec hw-ci grep -q "\"Authorization\": \"Basic $expected\"" /state/pi/agent/models.json
+          docker exec hw-ci grep -q '"apiKey": "local"' /state/pi/agent/models.json
+          docker exec hw-ci sh -c 'grep -q "sk-ci-custom" /state/pi/agent/auth.json'
+
+          # Half a credential pair cannot authenticate and must be refused
+          # instead of writing an endpoint that fails at the first prompt.
+          half=$(mktemp)
+          if docker exec \
+            -e HEDDLEWORK_OPENAI_BASE_URL=http://127.0.0.1:9/v1 \
+            -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+            -e HEDDLEWORK_OPENAI_USERNAME=ci-user \
+            hw-ci sh /opt/heddlework/install.sh --write-model-config > "$half" 2>&1; then
+            cat "$half"
+            echo "half a credential pair was accepted" >&2
+            exit 1
+          fi
+          grep -q 'HEDDLEWORK_OPENAI_PASSWORD is required alongside' "$half"
       - name: Exercise the pairing protocol (unauthenticated and authenticated)
         run: |
           # The web client must be served and the WebSocket endpoint must reject

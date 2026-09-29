@@ -49,8 +49,9 @@ pass() { printf 'PASS(%s): %s\n' "$CASE" "$*"; }
 CASE_HARNESS_ARGS=()
 # One of: menu-default menu-pi hidden-input already-configured ctrl-c
 #         eof-default bun-prompt-decline bun-install-accept auth-write
-#         custom-endpoint custom-endpoint-prompt endpoint-check
-#         endpoint-check-fail desktop-launcher
+#         custom-endpoint custom-endpoint-prompt custom-endpoint-basic
+#         custom-endpoint-basic-prompt endpoint-check endpoint-check-fail
+#         desktop-launcher
 
 run_steps() { # steps-file extra-env...
   local steps=$1; shift
@@ -208,6 +209,7 @@ case "$CASE" in
       printf 'WAIT:Model ID\nqwen2.5-coder:7b\n'
       printf 'WAIT:Provider ID\nENTER\n'
       printf 'WAIT:API flavor\nENTER\n'
+      printf 'WAIT:Basic auth\nENTER\n'
       printf 'WAIT:API key\nsk-custom-PROMPT-1\n'
     } > "$WORK/steps"
     run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=0 || fail "interactive run exited non-zero"
@@ -268,6 +270,78 @@ case "$CASE" in
       || fail "the probe did not fall back to a chat completion"
     grep -q 'POST /v1/chat/completions -> 200' "$ENDPOINT_LOG" || fail "no chat completion was attempted"
     pass "listing, credential, and listing-less endpoints all verified"
+    ;;
+
+  # An endpoint behind HTTP Basic auth: Pi cannot send Basic through an API key,
+  # so the credential becomes an Authorization header in models.json. A proxy
+  # asking for Basic rejects a bearer token, so the probe authenticates the same
+  # way, and half a credential pair is refused before anything is written.
+  custom-endpoint-basic)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node custom-endpoint-basic
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b" --require-basic ops:secret
+    models="$PI_CODING_AGENT_DIR/models.json"
+    expected=$("$PY" -c 'import base64; print(base64.b64encode(b"ops:secret").decode())')
+
+    # A key is also passed to prove it loses to the Basic credential.
+    printf 'WAIT:endpoint check: ok\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_USERNAME=ops \
+      HEDDLEWORK_OPENAI_PASSWORD=secret \
+      HEDDLEWORK_OPENAI_KEY=sk-ignored-1 || fail "basic-auth endpoint failed its check"
+
+    grep -q "GET /v1/models -> 200 auth=basic(ops:secret)" "$ENDPOINT_LOG" \
+      || fail "the probe did not authenticate with HTTP Basic"
+    grep -q "\"Authorization\": \"Basic $expected\"" "$models" \
+      || fail "models.json is missing the Basic Authorization header"
+    grep -q '"apiKey": "local"' "$models" \
+      || fail "the placeholder apiKey that keeps the model selectable is missing"
+    grep -q 'sk-ignored-1' "$models" && fail "the ignored API key leaked into models.json"
+    grep -q 'HTTP Basic auth is configured, so the API key is ignored' "$LOG" \
+      || fail "the ignored API key was not reported"
+    if [ -f "$PI_CODING_AGENT_DIR/auth.json" ]; then
+      grep -q 'custom-openai' "$PI_CODING_AGENT_DIR/auth.json" \
+        && fail "basic auth should not store an auth.json entry"
+    fi
+    grep -q "HTTP Basic auth for 'ops' is an Authorization header" "$LOG" \
+      || fail "the stored credential was not explained"
+    pass "the endpoint was verified with HTTP Basic and written as a header"
+    ;;
+
+  # The Basic credential collected interactively: the password goes through the
+  # hidden prompt, so it must never reach the terminal.
+  custom-endpoint-basic-prompt)
+    CASE_HARNESS_ARGS=(pi)
+    need_real_node custom-endpoint-basic-prompt
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b" --require-basic "ops:pw-BASIC-PROMPT-9"
+    expected=$("$PY" -c 'import base64; print(base64.b64encode(b"ops:pw-BASIC-PROMPT-9").decode())')
+    mkdir -p "$PI_CODING_AGENT_DIR"
+    {
+      for provider in anthropic openai google xai openrouter groq cerebras mistral deepseek; do
+        printf 'WAIT:Configure %s\nENTER\n' "$provider"
+      done
+      printf 'WAIT:Use a custom OpenAI-compatible base URL\ny\n'
+      printf 'WAIT:Base URL\n%s\n' "$ENDPOINT_URL"
+      printf 'WAIT:Model ID\nqwen2.5-coder:7b\n'
+      printf 'WAIT:Provider ID\nENTER\n'
+      printf 'WAIT:API flavor\nENTER\n'
+      printf 'WAIT:Basic auth\ny\n'
+      printf 'WAIT:Username\nops\n'
+      printf 'WAIT:Password\npw-BASIC-PROMPT-9\n'
+    } > "$WORK/steps"
+    run_steps "$WORK/steps" HEDDLEWORK_SKIP_PROVIDERS=0 || fail "interactive run exited non-zero"
+
+    grep -q 'GET /v1/models -> 200 auth=basic(ops:pw-BASIC-PROMPT-9)' "$ENDPOINT_LOG" \
+      || fail "the prompted credential did not reach the endpoint"
+    grep -q 'pw-BASIC-PROMPT-9' "$LOG" && fail "the password was echoed to the terminal"
+    models="$PI_CODING_AGENT_DIR/models.json"
+    grep -q "\"Authorization\": \"Basic $expected\"" "$models" \
+      || fail "models.json is missing the Basic header"
+    pass "prompt collected username and password, kept the password hidden, and verified it"
     ;;
 
   # Every way the check fails: a model id the server does not serve, a closed
@@ -336,7 +410,31 @@ case "$CASE" in
       HEDDLEWORK_OPENAI_KEY=sk-wrong-1
     grep -q 'HTTP 401' "$LOG" || fail "the rejected credential was not reported"
     grep -q 'invalid api key' "$LOG" || fail "the endpoint's own auth error was not surfaced"
-    pass "missing model id, closed port, no scheme, and a rejected key all aborted before writing"
+
+    # The same for a username and password the endpoint rejects, and for half a
+    # pair, which cannot authenticate at all and is refused before the probe.
+    stop_endpoint
+    start_endpoint "qwen2.5-coder:7b" --require-basic ops:secret
+    printf 'WAIT:rejected the username and password\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_USERNAME=ops \
+      HEDDLEWORK_OPENAI_PASSWORD=wrong-secret
+    grep -q 'GET /v1/models -> 401 auth=basic(ops:wrong-secret)' "$ENDPOINT_LOG" \
+      || fail "the probe did not try the given credentials"
+    grep -q 'invalid username or password' "$LOG" \
+      || fail "the endpoint's own auth error was not surfaced for Basic auth"
+    grep -q 'wrong-secret' "$models" && fail "a refused credential still wrote models.json"
+
+    printf 'WAIT:HEDDLEWORK_OPENAI_PASSWORD is required\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_USERNAME=ops
+    grep -q 'HEDDLEWORK_OPENAI_PASSWORD is required alongside HEDDLEWORK_OPENAI_USERNAME' "$LOG" \
+      || fail "half a credential pair was accepted"
+    pass "missing model id, closed port, no scheme, a rejected key, a rejected password, and half a pair all aborted before writing"
     ;;
 
   ctrl-c)

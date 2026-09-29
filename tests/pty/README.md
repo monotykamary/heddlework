@@ -31,14 +31,22 @@ Cases (each drives `install.sh` through `tests/pty/pty-run.py`):
 - `custom-endpoint-prompt` — the same endpoint collected interactively: every
   provider prompt declined, the default provider id and API flavor accepted, the
   endpoint verified, and the key never echoed to the terminal.
+- `custom-endpoint-basic` — an endpoint behind HTTP Basic auth: the probe
+  authenticates with the username and password, `models.json` gets the
+  `Basic` `Authorization` header and the placeholder `apiKey` instead of an
+  `auth.json` entry, and a passed API key is reported as ignored.
+- `custom-endpoint-basic-prompt` — the same credential collected interactively:
+  the password goes through the hidden prompt, reaches the endpoint, and is
+  never echoed to the terminal.
 - `endpoint-check` — the connectivity check on its passing paths, against the
   stub endpoint in `mock-endpoint.py`: a model listing that serves every
   requested id, a credential the endpoint accepts, and a server with no listing
   at all, which the probe verifies through a one-token chat completion.
 - `endpoint-check-fail` — every failing path: a model id the server does not
   serve, a closed port, a base URL with no scheme, an unknown model id on a
-  listing-less server, and a rejected key each abort before `models.json` is
-  written; `HEDDLEWORK_OPENAI_CHECK=warn` writes it anyway and says why.
+  listing-less server, a rejected key, a rejected username/password pair, and
+  half a pair each abort before `models.json` is written;
+  `HEDDLEWORK_OPENAI_CHECK=warn` writes it anyway and says why.
 - `desktop-launcher` — `packaging/linux/install-user.sh` completes on a PTY,
   stages binary/web/icon/launcher/desktop entry correctly, and the produced
   launcher executes through to the installed binary in the chosen workspace.
@@ -54,5 +62,5 @@ Extra arguments let a case build the stub it needs:
 
 ```bash
 python3 tests/pty/mock-endpoint.py --port-file /tmp/port --models a,b \
-  [--require-key KEY] [--no-models]
+  [--require-key KEY] [--require-basic USER:PASSWORD] [--no-models]
 ```

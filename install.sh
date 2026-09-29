@@ -9,7 +9,8 @@
 # Honors: NO_COLOR=1, HEDDLEWORK_NONINTERACTIVE=1, HEDDLEWORK_PI, HEDDLEWORK_PROVIDER,
 #         HEDDLEWORK_MODEL, HEDDLEWORK_SKIP_PROVIDERS=1, HEDDLEWORK_SKIP_SETUP=1,
 #         HEDDLEWORK_OPENAI_BASE_URL, HEDDLEWORK_OPENAI_MODEL, HEDDLEWORK_OPENAI_API,
-#         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY, HEDDLEWORK_OPENAI_CHECK,
+#         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY, HEDDLEWORK_OPENAI_USERNAME,
+#         HEDDLEWORK_OPENAI_PASSWORD, HEDDLEWORK_OPENAI_CHECK,
 #         HEDDLEWORK_OPENAI_CHECK_TIMEOUT.
 #
 #   ./install.sh --write-model-config   # write models.json from the
@@ -186,22 +187,30 @@ write_auth_entry() { # write_auth_entry <provider> <key>
 # environment variable: "providers.<id>" carries baseUrl, api, apiKey, and the
 # model ids to expose. A dedicated provider id leaves the built-in OpenAI
 # catalog intact, so both stay selectable in /model. Existing providers in the
-# file are preserved.
+# file are preserved. An endpoint behind HTTP Basic auth gets an Authorization
+# header instead of a key, since Pi sends apiKey as a bearer token.
 # ---------------------------------------------------------------------------
 MODELS_FILE="$PI_DIR/models.json"
 
-MODELS_STORE_SCRIPT='const fs=require("node:fs");let config={};try{config=JSON.parse(fs.readFileSync(process.env.PI_MODELS_FILE,"utf8"))}catch{};if(!config||typeof config!=="object"||Array.isArray(config))config={};if(!config.providers||typeof config.providers!=="object"||Array.isArray(config.providers))config.providers={};config.providers[process.env.PI_MODELS_PROVIDER]={baseUrl:process.env.PI_MODELS_BASE_URL,api:process.env.PI_MODELS_API,apiKey:process.env.PI_MODELS_API_KEY,models:process.env.PI_MODELS_IDS.split(",").filter(Boolean).map(id=>({id}))};fs.writeFileSync(process.env.PI_MODELS_FILE,JSON.stringify(config,null,2)+"\n",{mode:0o600})'
+# The write is one expression per statement so the whole writer stays a single
+# line, like the auth.json writer. PI_MODELS_BASIC carries "user:password" for an
+# endpoint behind HTTP Basic auth: Pi reaches it through a provider header (an
+# API key would be sent as `Bearer`, which such a proxy rejects), and Buffer
+# computes the base64 so no extra binary is needed. The placeholder apiKey keeps
+# the model selectable in /model while the header overrides its bearer value —
+# Pi merges provider headers after the key.
+MODELS_STORE_SCRIPT='const fs=require("node:fs");let config={};try{config=JSON.parse(fs.readFileSync(process.env.PI_MODELS_FILE,"utf8"))}catch{};if(!config||typeof config!=="object"||Array.isArray(config))config={};if(!config.providers||typeof config.providers!=="object"||Array.isArray(config.providers))config.providers={};const entry={baseUrl:process.env.PI_MODELS_BASE_URL,api:process.env.PI_MODELS_API,apiKey:process.env.PI_MODELS_API_KEY};if(process.env.PI_MODELS_BASIC)entry.headers={Authorization:"Basic "+Buffer.from(process.env.PI_MODELS_BASIC,"utf8").toString("base64")};entry.models=process.env.PI_MODELS_IDS.split(",").filter(Boolean).map(id=>({id}));config.providers[process.env.PI_MODELS_PROVIDER]=entry;fs.writeFileSync(process.env.PI_MODELS_FILE,JSON.stringify(config,null,2)+"\n",{mode:0o600})'
 
 provider_env_name() { # provider_env_name <provider-id> -> CUSTOM_OPENAI_API_KEY
   printf '%s_API_KEY' "$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
 }
 
-write_models_entry() { # write_models_entry <provider> <base-url> <api> <api-key> <model-ids>
+write_models_entry() { # write_models_entry <provider> <base-url> <api> <api-key> <model-ids> [user:password]
   mkdir -p "$PI_DIR"
   export PI_MODELS_FILE="$MODELS_FILE" PI_MODELS_PROVIDER="$1" PI_MODELS_BASE_URL="$2" \
-    PI_MODELS_API="$3" PI_MODELS_API_KEY="$4" PI_MODELS_IDS="$5"
+    PI_MODELS_API="$3" PI_MODELS_API_KEY="$4" PI_MODELS_IDS="$5" PI_MODELS_BASIC="${6:-}"
   run_js "$MODELS_STORE_SCRIPT" "$MODELS_FILE"
-  unset PI_MODELS_FILE PI_MODELS_PROVIDER PI_MODELS_BASE_URL PI_MODELS_API PI_MODELS_API_KEY PI_MODELS_IDS
+  unset PI_MODELS_FILE PI_MODELS_PROVIDER PI_MODELS_BASE_URL PI_MODELS_API PI_MODELS_API_KEY PI_MODELS_IDS PI_MODELS_BASIC
   chmod 600 "$MODELS_FILE" 2>/dev/null || true
 }
 
@@ -224,6 +233,8 @@ ENDPOINT_TIMEOUT=${HEDDLEWORK_OPENAI_CHECK_TIMEOUT:-10}
 ENDPOINT_BODY_FILE=''
 ENDPOINT_ERROR_FILE=''
 ENDPOINT_AUTH_HEADER=''
+ENDPOINT_BASIC_USER=''
+ENDPOINT_BASIC_PASSWORD=''
 
 # curl when present, wget otherwise; a slim host with neither reports a skipped
 # check rather than failing the install.
@@ -250,7 +261,13 @@ http_request() {
   if [ "$request_client" = curl ]; then
     set -- -sS -o "$ENDPOINT_BODY_FILE" -w '%{http_code}' \
       --connect-timeout 5 --max-time "$ENDPOINT_TIMEOUT"
-    [ -n "$ENDPOINT_AUTH_HEADER" ] && set -- "$@" -H "$ENDPOINT_AUTH_HEADER"
+    # Both clients compute the Basic header themselves, so the probe never has
+    # to encode anything itself.
+    if [ -n "$ENDPOINT_BASIC_USER" ]; then
+      set -- "$@" --user "$ENDPOINT_BASIC_USER:$ENDPOINT_BASIC_PASSWORD"
+    elif [ -n "$ENDPOINT_AUTH_HEADER" ]; then
+      set -- "$@" -H "$ENDPOINT_AUTH_HEADER"
+    fi
     if [ -n "$request_body" ]; then
       set -- "$@" -H 'Content-Type: application/json' -X POST --data "$request_body"
     fi
@@ -262,7 +279,11 @@ http_request() {
     # stderr, which is where the code is recovered from.
     set -- -q -O "$ENDPOINT_BODY_FILE" --server-response \
       --timeout="$ENDPOINT_TIMEOUT" --tries=1
-    [ -n "$ENDPOINT_AUTH_HEADER" ] && set -- "$@" --header "$ENDPOINT_AUTH_HEADER"
+    if [ -n "$ENDPOINT_BASIC_USER" ]; then
+      set -- "$@" --user "$ENDPOINT_BASIC_USER" --password "$ENDPOINT_BASIC_PASSWORD"
+    elif [ -n "$ENDPOINT_AUTH_HEADER" ]; then
+      set -- "$@" --header "$ENDPOINT_AUTH_HEADER"
+    fi
     if [ -n "$request_body" ]; then
       set -- "$@" --header 'Content-Type: application/json' --post-data "$request_body"
     fi
@@ -284,8 +305,10 @@ endpoint_offered_models() {
     | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -n 12 | tr '\n' ' ' || true
 }
 
-# probe_custom_endpoint <base-url> <api> <model-ids> [key]
+# probe_custom_endpoint <base-url> <api> <model-ids> [key] [user:password]
 #   0 verified, 1 reached but broken, 2 not checked
+# A "user:password" argument probes with HTTP Basic auth; otherwise the key is
+# sent as a bearer token, exactly as Pi will send it.
 probe_custom_endpoint() {
   probe_body=$(mktemp "${TMPDIR:-/tmp}/heddlework-endpoint-body.XXXXXX") || return 2
   probe_error=$(mktemp "${TMPDIR:-/tmp}/heddlework-endpoint-error.XXXXXX") \
@@ -298,14 +321,17 @@ probe_custom_endpoint() {
   rm -f "$probe_body" "$probe_error"
   ENDPOINT_BODY_FILE=''
   ENDPOINT_ERROR_FILE=''
+  ENDPOINT_BASIC_USER=''
+  ENDPOINT_BASIC_PASSWORD=''
   return "${probe_status:-0}"
 }
 
-probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key]
+probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key] [user:password]
   probe_base=$1
   probe_api=$2
   probe_models=$3
   probe_key=${4:-}
+  probe_basic=${5:-}
 
   case "$probe_api" in
     openai-*) ;;
@@ -333,7 +359,14 @@ probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key]
   # Trailing slashes would double up in "$base/models".
   probe_base=$(printf '%s' "$probe_base" | sed 's:/*$::')
   ENDPOINT_AUTH_HEADER=''
-  [ -n "$probe_key" ] && ENDPOINT_AUTH_HEADER="Authorization: Bearer $probe_key"
+  ENDPOINT_BASIC_USER=''
+  ENDPOINT_BASIC_PASSWORD=''
+  if [ -n "$probe_basic" ]; then
+    ENDPOINT_BASIC_USER=${probe_basic%%:*}
+    ENDPOINT_BASIC_PASSWORD=${probe_basic#*:}
+  elif [ -n "$probe_key" ]; then
+    ENDPOINT_AUTH_HEADER="Authorization: Bearer $probe_key"
+  fi
 
   probe_code=$(http_request "$probe_client" "$probe_base/models")
   case "$probe_code" in
@@ -371,7 +404,11 @@ probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key]
       return 1
       ;;
     401|403)
-      warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)" ;;
+      if [ -n "$probe_basic" ]; then
+        warn "endpoint check: $probe_base rejected the username and password (HTTP $probe_code)"
+      else
+        warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)"
+      fi ;;
     000)
       warn "endpoint check: cannot reach $probe_base/models — $(head -n 1 "$ENDPOINT_ERROR_FILE")" ;;
     *)
@@ -383,7 +420,12 @@ probe_endpoint() { # probe_endpoint <base-url> <api> <model-ids> [key]
       probe_code=$(http_request "$probe_client" "$probe_base/chat/completions" "$probe_json")
       case "$probe_code" in
         2*) info "endpoint check: ok — $probe_base answered a chat completion for $probe_first"; return 0 ;;
-        401|403) warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)" ;;
+        401|403)
+          if [ -n "$probe_basic" ]; then
+            warn "endpoint check: $probe_base rejected the username and password (HTTP $probe_code)"
+          else
+            warn "endpoint check: $probe_base rejected the credential (HTTP $probe_code)"
+          fi ;;
         000) warn "endpoint check: cannot reach $probe_base/chat/completions — $(head -n 1 "$ENDPOINT_ERROR_FILE")" ;;
         *)
           probe_detail=$(endpoint_error_message)
@@ -422,12 +464,14 @@ run_endpoint_check() {
   die "refusing to write an endpoint that failed its check — fix the base URL or model id, start the server, or set HEDDLEWORK_OPENAI_CHECK=warn to write it anyway"
 }
 
-write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model-ids> [key]
+write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model-ids> [key] [username] [password]
   custom_name=$1
   custom_base_url=$2
   custom_api=$3
   custom_models=$4
   custom_key=${5:-}
+  custom_user=${6:-}
+  custom_pass=${7:-}
 
   case "$custom_base_url" in
     http://*|https://*) ;;
@@ -436,7 +480,24 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
 
   # Resolving the credential first lets the check use exactly what Pi will send,
   # and keeps a failed check from leaving a half-configured endpoint behind.
-  if [ -n "$custom_key" ]; then
+  custom_basic=''
+  custom_probe_key=''
+  custom_probe_basic=''
+  custom_key_ref='local'
+  if [ -n "$custom_user" ] || [ -n "$custom_pass" ]; then
+    [ -n "$custom_user" ] || die "a username is required alongside the password for HTTP Basic auth"
+    [ -n "$custom_pass" ] || die "a password is required alongside the username for HTTP Basic auth"
+    # A proxy asking for Basic auth rejects a bearer token, and Pi cannot send
+    # Basic through apiKey, so the credential travels as a provider header while
+    # the placeholder apiKey keeps the model selectable in /model.
+    custom_basic="$custom_user:$custom_pass"
+    custom_probe_basic=$custom_basic
+    if [ -n "$custom_key" ]; then
+      warn "HTTP Basic auth is configured, so the API key is ignored (the Authorization header replaces it)"
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+      info "OPENAI_API_KEY is set but unused: this endpoint authenticates with HTTP Basic"
+    fi
+  elif [ -n "$custom_key" ]; then
     custom_key_ref='${'"$(provider_env_name "$custom_name")"'}';
     custom_probe_key=$custom_key
   elif [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -445,11 +506,10 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
   else
     # Local servers ignore credentials, but a missing key hides the models from
     # /model, so a literal placeholder keeps them selectable.
-    custom_key_ref='local'
     custom_probe_key='local'
   fi
 
-  run_endpoint_check "$custom_base_url" "$custom_api" "$custom_models" "$custom_probe_key"
+  run_endpoint_check "$custom_base_url" "$custom_api" "$custom_models" "$custom_probe_key" "$custom_probe_basic"
 
   case "$custom_key_ref" in
     local) ;;
@@ -466,24 +526,38 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
       ;;
   esac
 
-  write_models_entry "$custom_name" "$custom_base_url" "$custom_api" "$custom_key_ref" "$custom_models"
+  write_models_entry "$custom_name" "$custom_base_url" "$custom_api" "$custom_key_ref" "$custom_models" "$custom_basic"
   CUSTOM_ENDPOINT_NAME=$custom_name
   CUSTOM_ENDPOINT_MODEL=$(printf '%s' "$custom_models" | cut -d, -f1)
   info "$custom_name -> $custom_base_url (api: $custom_api, models: $custom_models)"
   if [ -n "$custom_key" ]; then
     info "key stored in $AUTH_FILE; export $(provider_env_name "$custom_name") where that file is unavailable"
   fi
+  if [ -n "$custom_basic" ]; then
+    info "HTTP Basic auth for '$custom_user' is an Authorization header in $MODELS_FILE (0600)"
+    info "to keep the secret out of that file, replace the header value with a lone \$MY_BASIC_HEADER and export it instead"
+  fi
 }
 
 write_custom_endpoint_from_env() {
   [ -n "${HEDDLEWORK_OPENAI_BASE_URL:-}" ] || die "HEDDLEWORK_OPENAI_BASE_URL is not set"
   [ -n "${HEDDLEWORK_OPENAI_MODEL:-}" ] || die "HEDDLEWORK_OPENAI_MODEL is required alongside HEDDLEWORK_OPENAI_BASE_URL (comma-separate several model ids)"
+  # Basic credentials must arrive as a pair: half of one would otherwise write an
+  # endpoint that only fails at the first prompt.
+  if [ -n "${HEDDLEWORK_OPENAI_USERNAME:-}" ] && [ -z "${HEDDLEWORK_OPENAI_PASSWORD:-}" ]; then
+    die "HEDDLEWORK_OPENAI_PASSWORD is required alongside HEDDLEWORK_OPENAI_USERNAME"
+  fi
+  if [ -n "${HEDDLEWORK_OPENAI_PASSWORD:-}" ] && [ -z "${HEDDLEWORK_OPENAI_USERNAME:-}" ]; then
+    die "HEDDLEWORK_OPENAI_USERNAME is required alongside HEDDLEWORK_OPENAI_PASSWORD"
+  fi
   write_custom_endpoint \
     "${HEDDLEWORK_OPENAI_NAME:-custom-openai}" \
     "$HEDDLEWORK_OPENAI_BASE_URL" \
     "${HEDDLEWORK_OPENAI_API:-openai-completions}" \
     "$HEDDLEWORK_OPENAI_MODEL" \
-    "${HEDDLEWORK_OPENAI_KEY:-}"
+    "${HEDDLEWORK_OPENAI_KEY:-}" \
+    "${HEDDLEWORK_OPENAI_USERNAME:-}" \
+    "${HEDDLEWORK_OPENAI_PASSWORD:-}"
 }
 
 prompt_custom_endpoint() {
@@ -511,6 +585,35 @@ prompt_custom_endpoint() {
   printf 'API flavor [openai-completions]: '
   read -r custom_api || true
   custom_api=${custom_api:-openai-completions}
+
+  # The credential is either an API key (sent as a bearer token) or a username
+  # and password (sent as an Authorization header, which is what a proxy asks
+  # for). A pair from the environment is used without asking, the way the base
+  # URL and model ids are.
+  custom_user=${HEDDLEWORK_OPENAI_USERNAME:-}
+  custom_pass=${HEDDLEWORK_OPENAI_PASSWORD:-}
+  if [ -n "$custom_user" ] && [ -n "$custom_pass" ]; then
+    info "using HEDDLEWORK_OPENAI_USERNAME for HTTP Basic auth"
+    write_custom_endpoint "$custom_name" "$custom_base_url" "$custom_api" "$custom_models" '' "$custom_user" "$custom_pass"
+    return 0
+  fi
+  [ -n "$custom_user" ] && warn "HEDDLEWORK_OPENAI_USERNAME is set without HEDDLEWORK_OPENAI_PASSWORD"
+  printf 'Does the endpoint use HTTP Basic auth (username and password)? [y/N] '
+  read -r answer || true
+  case "$answer" in
+    y|Y|yes|YES)
+      printf 'Username: '
+      read -r custom_user || true
+      read_hidden 'Password (input hidden, Ctrl-C cancels): '
+      custom_pass=$HIDDEN_INPUT
+      if [ -z "$custom_user" ] || [ -z "$custom_pass" ]; then
+        warn "HTTP Basic auth needs both a username and a password — skipping the custom endpoint"
+        return 0
+      fi
+      write_custom_endpoint "$custom_name" "$custom_base_url" "$custom_api" "$custom_models" '' "$custom_user" "$custom_pass"
+      return 0
+      ;;
+  esac
   read_hidden 'API key (input hidden; press Enter for a local endpoint without auth): '
   write_custom_endpoint "$custom_name" "$custom_base_url" "$custom_api" "$custom_models" "$HIDDEN_INPUT"
 }
@@ -646,6 +749,14 @@ Custom OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, LiteLLM, a gateway):
   HEDDLEWORK_OPENAI_NAME        provider id to create (default custom-openai)
   HEDDLEWORK_OPENAI_KEY         key for the endpoint; defaults to OPENAI_API_KEY,
                                 otherwise to a placeholder local servers ignore
+  HEDDLEWORK_OPENAI_USERNAME   username for an endpoint behind HTTP Basic auth
+  HEDDLEWORK_OPENAI_PASSWORD   password for that endpoint; the pair is required
+                                together and replaces HEDDLEWORK_OPENAI_KEY, as
+                                Pi sends Basic through a request header rather
+                                than an API key. The credential is written to
+                                models.json (mode 0600): replace the header value
+                                with a lone $MY_BASIC_HEADER to keep it in the
+                                environment instead
   HEDDLEWORK_OPENAI_CHECK       require (default) aborts the install when the
                                 endpoint is unreachable, rejects the key, or does
                                 not serve the given model id; warn writes the

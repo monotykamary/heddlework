@@ -8,15 +8,19 @@ and fails without a real model server:
     POST /v1/chat/completions  -> a canned completion, 404 for an unknown model
 
 Options:
-    --port-file FILE   write the bound port here (binds 127.0.0.1:0)
-    --models "a,b"     model ids the endpoint claims to serve
-    --require-key KEY  answer 401 unless the bearer token matches
-    --no-models        omit the model listing (404) so the chat fallback runs
+    --port-file FILE       write the bound port here (binds 127.0.0.1:0)
+    --models "a,b"         model ids the endpoint claims to serve
+    --require-key KEY      answer 401 unless the bearer token matches
+    --require-basic U:P    answer 401 unless `Authorization: Basic` matches U:P
+    --no-models            omit the model listing (404) so the chat fallback runs
 
 Every request is logged to stdout as `[mock-endpoint] <METHOD> <path> -> <code>`
-so a case can assert which route the probe used.
+so a case can assert which route the probe used; the scheme of the credential it
+arrived with is logged too, since a bearer token and HTTP Basic auth have to be
+told apart.
 """
 import argparse
+import base64
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +31,7 @@ def parse_args(argv):
     parser.add_argument("--port-file", required=True)
     parser.add_argument("--models", default="")
     parser.add_argument("--require-key", default="")
+    parser.add_argument("--require-basic", default="")
     parser.add_argument("--no-models", action="store_true")
     return parser.parse_args(argv)
 
@@ -35,31 +40,48 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     models = []
     require_key = ""
+    require_basic = ""
     no_models = False
 
     def log_message(self, fmt, *args):  # keep the default access log quiet
         pass
 
+    def _scheme(self):
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            return "bearer"
+        if header.startswith("Basic "):
+            decoded = base64.b64decode(header[len("Basic "):]).decode("utf-8", "replace")
+            return f"basic({decoded})"
+        return "anonymous"
+
     def _send(self, code, payload):
         body = json.dumps(payload).encode()
         print(
-            f"[mock-endpoint] {self.command} {self.path} -> {code}",
+            f"[mock-endpoint] {self.command} {self.path} -> {code} auth={self._scheme()}",
             file=sys.stdout,
             flush=True,
         )
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if code == 401:
+            self.send_header("WWW-Authenticate", 'Basic realm="mock-endpoint"')
         self.end_headers()
         self.wfile.write(body)
 
     def _authorized(self):
-        if not self.require_key:
+        if not self.require_key and not self.require_basic:
             return True
         header = self.headers.get("Authorization", "")
-        if header == f"Bearer {self.require_key}":
+        if self.require_key and header == f"Bearer {self.require_key}":
             return True
-        self._send(401, {"error": {"message": "invalid api key", "type": "invalid_request_error"}})
+        if self.require_basic:
+            expected = base64.b64encode(self.require_basic.encode()).decode()
+            if header == f"Basic {expected}":
+                return True
+        message = "invalid username or password" if self.require_basic else "invalid api key"
+        self._send(401, {"error": {"message": message, "type": "invalid_request_error"}})
         return False
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
@@ -125,6 +147,7 @@ def main() -> int:
     args = parse_args(sys.argv[1:])
     Handler.models = [model.strip() for model in args.models.split(",") if model.strip()]
     Handler.require_key = args.require_key
+    Handler.require_basic = args.require_basic
     Handler.no_models = args.no_models
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -132,7 +155,9 @@ def main() -> int:
         handle.write(str(server.server_address[1]))
     print(
         f"[mock-endpoint] listening on 127.0.0.1:{server.server_address[1]} "
-        f"models={Handler.models} no-models={Handler.no_models}",
+        f"models={Handler.models} no-models={Handler.no_models} "
+        f"key={'set' if Handler.require_key else 'none'} "
+        f"basic={'set' if Handler.require_basic else 'none'}",
         file=sys.stdout,
         flush=True,
     )
