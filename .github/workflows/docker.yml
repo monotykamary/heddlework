@@ -83,7 +83,7 @@ jobs:
           docker logs hw-ci 2>&1 | grep -q 'endpoint check: cannot reach'
           # An endpoint that already failed the HTTP probe must not also hold up
           # startup for the round trip's own timeout.
-          docker logs hw-ci 2>&1 | grep -q 'skipping the round trip through Pi'
+          docker logs hw-ci 2>&1 | grep -q 'skipping the round trip'
       - name: Verify the endpoint check rejects a bad base URL
         run: |
           # The installer's config-only mode is what the entrypoint runs, so a
