@@ -38,6 +38,16 @@ Cases (each drives `install.sh` through `tests/pty/pty-run.py`):
 - `custom-endpoint-basic-prompt` — the same credential collected interactively:
   the password goes through the hidden prompt, reaches the endpoint, and is
   never echoed to the terminal.
+- `endpoint-roundtrip` — after the write, Pi itself is asked for a one-word
+  answer with the provider and model the installer configured: the mock `pi`
+  records the exact argv (provider, model, `--print`, and the flags that keep a
+  session, tools, and startup network out of the request) and the case asserts
+  the reply it reported. Also proves the stub's streaming path, which is what a
+  real Pi asks for, and that `HEDDLEWORK_OPENAI_CHECK=off` skips the round trip.
+- `endpoint-roundtrip-fail` — Pi's own error, a clean exit with no answer, and a
+  Pi that never answers (bounded by `HEDDLEWORK_OPENAI_ANSWER_TIMEOUT`), each
+  reported after the configuration was written: `require` refuses the endpoint
+  while leaving the config, `warn` explains and installs.
 - `endpoint-check` — the connectivity check on its passing paths, against the
   stub endpoint in `mock-endpoint.py`: a model listing that serves every
   requested id, a credential the endpoint accepts, and a server with no listing
@@ -55,7 +65,19 @@ The PTY transcript for each case lands in `/tmp` and the runner asserts on it
 (see `run-case.sh`). Cases that exercise the endpoint check start the stub server
 in `mock-endpoint.py` on an ephemeral port and point `HEDDLEWORK_OPENAI_BASE_URL`
 at it, so the check is verified against real HTTP rather than a mock of the
-probe. Only the newest run of a case is left in the transcript, because the
+probe. The stub also streams server-sent events, the way a real endpoint answers
+a streaming request.
+
+The round trip through Pi uses the mock `pi` on the case's PATH. It answers a
+`--print` run from the environment instead of a model:
+
+```bash
+PI_MOCK_ARGV_LOG=/path/to/argv.log   # append the argv it was called with
+PI_MOCK_REPLY='pong'                 # what the "model" answers (empty is empty)
+PI_MOCK_STDERR='No API key ...'      # text to write to stderr
+PI_MOCK_EXIT=1                       # exit status
+PI_MOCK_SLEEP=3                      # stall before answering
+``` Only the newest run of a case is left in the transcript, because the
 runner truncates the log per invocation.
 
 Extra arguments let a case build the stub it needs:

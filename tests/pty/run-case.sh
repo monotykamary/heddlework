@@ -51,7 +51,7 @@ CASE_HARNESS_ARGS=()
 #         eof-default bun-prompt-decline bun-install-accept auth-write
 #         custom-endpoint custom-endpoint-prompt custom-endpoint-basic
 #         custom-endpoint-basic-prompt endpoint-check endpoint-check-fail
-#         desktop-launcher
+#         endpoint-roundtrip endpoint-roundtrip-fail desktop-launcher
 
 run_steps() { # steps-file extra-env...
   local steps=$1; shift
@@ -342,6 +342,120 @@ case "$CASE" in
     grep -q "\"Authorization\": \"Basic $expected\"" "$models" \
       || fail "models.json is missing the Basic header"
     pass "prompt collected username and password, kept the password hidden, and verified it"
+    ;;
+
+  # The round trip through Pi: after writing the configuration, the installer
+  # asks the actual CLI for a one-word answer with the provider and model it just
+  # wrote, so a configuration Pi cannot use is reported here, with the model's
+  # words, instead of at the first prompt. The mock pi answers from the
+  # environment and records the argv it was handed.
+  endpoint-roundtrip)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-roundtrip
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    : > "$WORK/pi-argv.log"
+
+    printf 'WAIT:Pi answered\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-roundtrip-1 \
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" || fail "the round trip failed"
+    grep -q 'asking Pi for a one-word answer through custom-openai/qwen2.5-coder:7b' "$LOG" \
+      || fail "the round trip was not announced"
+    grep -q 'Pi answered "pong"' "$LOG" || fail "the answer was not reported"
+
+    # It must ask for the provider and model it wrote, without touching sessions,
+    # tools, or the network beyond the endpoint.
+    argv=$(cat "$WORK/pi-argv.log")
+    printf '%s\n' "$argv" | grep -q -- '--provider custom-openai --model qwen2.5-coder:7b --print Reply with the single word: pong' \
+      || fail "the round trip did not use the configured provider and model: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--no-session' || fail "--no-session was not passed: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--no-tools' || fail "--no-tools was not passed: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--offline' || fail "--offline was not passed: $argv"
+    [ -s "$PI_CODING_AGENT_DIR/models.json" ] || fail "the configuration was not written"
+
+    # A real Pi asks for a server-sent-event stream, which is why the stub answers
+    # one; prove that route streams and terminates the way Pi expects.
+    curl -sS -N -H 'Content-Type: application/json' \
+      -d '{"model":"qwen2.5-coder:7b","messages":[{"role":"user","content":"hi"}],"stream":true}' \
+      "$ENDPOINT_URL/chat/completions" > "$WORK/stream.out" || fail "the stub refused a streaming request"
+    grep -q '"object": "chat.completion.chunk"' "$WORK/stream.out" || fail "the stub did not stream chunks"
+    grep -q 'data: \[DONE\]' "$WORK/stream.out" || fail "the stub stream did not end with [DONE]"
+
+    # off skips the round trip along with the HTTP probe.
+    : > "$WORK/pi-argv.log"
+    printf 'WAIT:without testing it\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_CHECK=off \
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" || fail "off mode exited non-zero"
+    [ -s "$WORK/pi-argv.log" ] && fail "off mode still ran Pi"
+    pass "Pi was asked for an answer with the written provider and model, and off skipped it"
+    ;;
+
+  # What the round trip reports when Pi cannot use the endpoint: its own error,
+  # an empty answer, and an endpoint that never answers at all. All of them come
+  # after the write, so require mode refuses the endpoint while the report keeps
+  # the configuration that the HTTP probe already accepted.
+  endpoint-roundtrip-fail)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-roundtrip-fail
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    models="$PI_CODING_AGENT_DIR/models.json"
+    common_url="HEDDLEWORK_OPENAI_BASE_URL=$ENDPOINT_URL"
+
+    # Pi exits non-zero with a credential error of its own.
+    printf 'WAIT:could not complete a request\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-roundtrip-2 \
+      PI_MOCK_EXIT=1 \
+      PI_MOCK_STDERR='No API key for provider: custom-openai'
+    grep -q 'Pi could not complete a request through custom-openai: No API key for provider: custom-openai' "$LOG" \
+      || fail "Pi's own error was not reported"
+    grep -q 'the endpoint answered but Pi could not complete a request through it' "$LOG" \
+      || fail "require mode did not refuse the endpoint"
+    [ -s "$models" ] || fail "the round trip should run after the write, not instead of it"
+
+    # warn reports the same failure and installs anyway.
+    printf 'WAIT:continuing anyway\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-roundtrip-2 \
+      HEDDLEWORK_OPENAI_CHECK=warn \
+      PI_MOCK_EXIT=1 \
+      PI_MOCK_STDERR='No API key for provider: custom-openai' || fail "warn mode should still install"
+    grep -q 'continuing anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt if this persists' "$LOG" \
+      || fail "warn mode did not explain the consequence"
+
+    # A clean exit with nothing to say is not an answer either.
+    printf 'WAIT:returned no answer\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-roundtrip-2 \
+      PI_MOCK_REPLY=''
+    grep -q 'Pi completed the request but returned no answer' "$LOG" \
+      || fail "an empty answer was taken for success"
+
+    # An endpoint that accepts the connection and never answers is bounded by the
+    # answer timeout instead of hanging the install.
+    printf 'WAIT:did not answer within 1s\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-roundtrip-2 \
+      HEDDLEWORK_OPENAI_ANSWER_TIMEOUT=1 \
+      PI_MOCK_SLEEP=3
+    grep -q 'raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT' "$LOG" \
+      || fail "the timeout did not point at the knob that raises it"
+    pass "Pi's error, an empty answer, and a stalled endpoint were all reported without losing the config"
     ;;
 
   # Every way the check fails: a model id the server does not serve, a closed

@@ -11,7 +11,7 @@
 #         HEDDLEWORK_OPENAI_BASE_URL, HEDDLEWORK_OPENAI_MODEL, HEDDLEWORK_OPENAI_API,
 #         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY, HEDDLEWORK_OPENAI_USERNAME,
 #         HEDDLEWORK_OPENAI_PASSWORD, HEDDLEWORK_OPENAI_CHECK,
-#         HEDDLEWORK_OPENAI_CHECK_TIMEOUT.
+#         HEDDLEWORK_OPENAI_CHECK_TIMEOUT, HEDDLEWORK_OPENAI_ANSWER_TIMEOUT.
 #
 #   ./install.sh --write-model-config   # write models.json from the
 #                                       # HEDDLEWORK_OPENAI_* variables and exit
@@ -181,7 +181,8 @@ write_auth_entry() { # write_auth_entry <provider> <key>
 }
 
 # ---------------------------------------------------------------------------
-# Custom OpenAI-compatible endpoint — writes <agent-dir>/models.json
+# Custom OpenAI-compatible endpoint — writes <agent-dir>/models.json and then
+# proves the result, first with an HTTP probe and finally by asking Pi itself
 #
 # Pi reaches a non-default endpoint through models.json rather than an
 # environment variable: "providers.<id>" carries baseUrl, api, apiKey, and the
@@ -454,14 +455,128 @@ run_endpoint_check() {
   check_status=''
   probe_custom_endpoint "$@" || check_status=$?
   case "${check_status:-0}" in
-    0|2) return 0 ;;
+    0|2) ENDPOINT_CHECK_STATUS=0; return 0 ;;
   esac
+  # 1 is a confirmed failure: the HTTP probe already said what is wrong, so the
+  # round trip through Pi is skipped rather than waiting out a second timeout.
+  ENDPOINT_CHECK_STATUS=1
 
   if [ "$check_mode" = warn ]; then
     warn "writing the endpoint anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt while it stays unreachable"
     return 0
   fi
   die "refusing to write an endpoint that failed its check — fix the base URL or model id, start the server, or set HEDDLEWORK_OPENAI_CHECK=warn to write it anyway"
+}
+
+# ---------------------------------------------------------------------------
+# Round trip through Pi
+#
+# The HTTP probe proves the endpoint answers; it does not prove Pi can use the
+# configuration just written. This asks Pi itself for a one-word reply with the
+# provider and model an editor would launch, so a configuration Pi rejects — a
+# header it cannot resolve, a model id it hides, a credential only the probe
+# knew — is reported here, with the model's own words, instead of at the first
+# prompt. It runs after the write because Pi reads models.json and auth.json, so
+# it never gates the write, and it is fatal only in require mode.
+# ---------------------------------------------------------------------------
+# A cold local model can take far longer to load than an HTTP probe should wait,
+# hence a separate budget for the answer.
+PI_ANSWER_TIMEOUT=${HEDDLEWORK_OPENAI_ANSWER_TIMEOUT:-60}
+PI_ROUNDTRIP_PROMPT='Reply with the single word: pong'
+PI_HELP=''
+
+# pi_supports <flag> — whether the installed Pi advertises a flag. --print is
+# required to ask for an answer at all; the optional flags are passed only when
+# present, so an older build is still exercised instead of failing on an option
+# it does not know.
+pi_supports() {
+  if [ -z "$PI_HELP" ]; then
+    PI_HELP=$(pi --help 2>&1 || true)
+  fi
+  printf '%s' "$PI_HELP" | grep -q -- "$1"
+}
+
+# run_pi_roundtrip <provider> <model-id>
+run_pi_roundtrip() {
+  roundtrip_provider=$1
+  roundtrip_model=$2
+  case "${HEDDLEWORK_OPENAI_CHECK:-require}" in
+    off|no|0) return 0 ;;
+  esac
+  if ! command -v pi >/dev/null 2>&1; then
+    info "endpoint check: skipped the round trip — 'pi' is not on PATH (a full install would have put it there)"
+    return 0
+  fi
+  if ! pi_supports --print; then
+    info "endpoint check: skipped the round trip — this Pi build has no --print mode"
+    return 0
+  fi
+
+  set -- --provider "$roundtrip_provider" --model "$roundtrip_model" --print "$PI_ROUNDTRIP_PROMPT"
+  pi_supports --no-session && set -- "$@" --no-session
+  pi_supports --no-tools && set -- "$@" --no-tools
+  pi_supports --offline && set -- "$@" --offline
+
+  roundtrip_dir=$(mktemp -d "${TMPDIR:-/tmp}/heddlework-roundtrip.XXXXXX") || return 0
+  info "endpoint check: asking Pi for a one-word answer through $roundtrip_provider/$roundtrip_model"
+  # The status goes to a file because a backgrounded `kill -0` cannot tell a
+  # running child from an unreaped one; polling the file also bounds the wait
+  # without relying on GNU `timeout`, which macOS does not ship. The subshell
+  # runs Pi from a scratch directory so the installer's working directory does
+  # not add context files to the request.
+  (
+    cd "$roundtrip_dir" || exit 1
+    # `|| capture` so a failing Pi still reaches the line that records it, which
+    # `set -e` would otherwise skip along with the status file.
+    roundtrip_exit=0
+    PI_CODING_AGENT_DIR="$PI_DIR" pi "$@" > "$roundtrip_dir/answer" 2> "$roundtrip_dir/error" || roundtrip_exit=$?
+    printf '%s' "$roundtrip_exit" > "$roundtrip_dir/status"
+  ) &
+  roundtrip_pid=$!
+
+  roundtrip_waited=0
+  while [ ! -s "$roundtrip_dir/status" ] && [ "$roundtrip_waited" -lt "$PI_ANSWER_TIMEOUT" ]; do
+    sleep 1
+    roundtrip_waited=$((roundtrip_waited + 1))
+  done
+
+  # CR is stripped because Pi may be on Windows; the last non-empty line is the
+  # answer, since a one-word reply can still be preceded by startup notices.
+  roundtrip_reply=$(tr -d '\r' < "$roundtrip_dir/answer" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-160) || true
+  roundtrip_reason=$(tr -d '\r' < "$roundtrip_dir/error" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-300) || true
+  roundtrip_status=$(cat "$roundtrip_dir/status" 2>/dev/null) || roundtrip_status=''
+
+  if [ -z "$roundtrip_status" ]; then
+    kill "$roundtrip_pid" 2>/dev/null || true
+    rm -rf "$roundtrip_dir"
+    warn "endpoint check: Pi did not answer within ${PI_ANSWER_TIMEOUT}s; a cold local model can take a while to load — raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT if this endpoint is just slow"
+    verdict_pi_roundtrip_failure
+    return $?
+  fi
+  rm -rf "$roundtrip_dir"
+
+  if [ "$roundtrip_status" != 0 ]; then
+    warn "endpoint check: Pi could not complete a request through $roundtrip_provider: ${roundtrip_reason:-no error output (exit $roundtrip_status)}"
+    verdict_pi_roundtrip_failure
+    return $?
+  fi
+  if [ -z "$roundtrip_reply" ]; then
+    warn "endpoint check: Pi completed the request but returned no answer${roundtrip_reason:+ (${roundtrip_reason})}"
+    verdict_pi_roundtrip_failure
+    return $?
+  fi
+  info "endpoint check: Pi answered \"$roundtrip_reply\""
+  return 0
+}
+
+# The shared verdict: require mode refuses an endpoint Pi cannot use, warn mode
+# reports it and continues.
+verdict_pi_roundtrip_failure() {
+  if [ "${HEDDLEWORK_OPENAI_CHECK:-require}" = warn ]; then
+    warn "continuing anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt if this persists"
+    return 0
+  fi
+  die "the endpoint answered but Pi could not complete a request through it — see the warning above, or set HEDDLEWORK_OPENAI_CHECK=warn to install anyway"
 }
 
 write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model-ids> [key] [username] [password]
@@ -537,6 +652,12 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
     info "HTTP Basic auth for '$custom_user' is an Authorization header in $MODELS_FILE (0600)"
     info "to keep the secret out of that file, replace the header value with a lone \$MY_BASIC_HEADER and export it instead"
   fi
+
+  if [ "$ENDPOINT_CHECK_STATUS" = 1 ]; then
+    info "endpoint check: skipping the round trip through Pi — the endpoint did not answer the HTTP probe"
+    return 0
+  fi
+  run_pi_roundtrip "$custom_name" "$CUSTOM_ENDPOINT_MODEL"
 }
 
 write_custom_endpoint_from_env() {
@@ -620,6 +741,7 @@ prompt_custom_endpoint() {
 
 CUSTOM_ENDPOINT_NAME=''
 CUSTOM_ENDPOINT_MODEL=''
+ENDPOINT_CHECK_STATUS=0
 
 setup_providers() {
   if [ "${HEDDLEWORK_SKIP_PROVIDERS:-0}" = "1" ]; then
@@ -758,10 +880,14 @@ Custom OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, LiteLLM, a gateway):
                                 with a lone $MY_BASIC_HEADER to keep it in the
                                 environment instead
   HEDDLEWORK_OPENAI_CHECK       require (default) aborts the install when the
-                                endpoint is unreachable, rejects the key, or does
-                                not serve the given model id; warn writes the
-                                config anyway; off skips the check
+                                endpoint is unreachable, rejects the credential,
+                                does not serve the given model id, or Pi cannot
+                                complete a request through it; warn reports all
+                                of that and installs anyway; off skips the checks
   HEDDLEWORK_OPENAI_CHECK_TIMEOUT  seconds to wait for the endpoint (default 10)
+  HEDDLEWORK_OPENAI_ANSWER_TIMEOUT seconds Pi may take to answer through the
+                                endpoint (default 60; a cold local model can
+                                take a while to load)
 
 Examples:
   ./install.sh                    # interactive menu

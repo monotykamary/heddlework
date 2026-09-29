@@ -101,6 +101,46 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _relay(self, model):
+        """Answer as a server-sent-event stream, which is what Pi asks for.
+
+        The body has no length, so the response ends with the [DONE] sentinel and
+        the connection closes after it.
+        """
+        print(
+            f"[mock-endpoint] {self.command} {self.path} -> 200 (stream) auth={self._scheme()}",
+            file=sys.stdout,
+            flush=True,
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        frames = [
+            {
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "content": "pong"}, "finish_reason": None}
+                ],
+            },
+            {
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        ]
+        for frame in frames:
+            self.wfile.write(f"data: {json.dumps(frame)}\n\n".encode())
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self._send(404, {"error": {"message": "not found"}})
@@ -125,6 +165,9 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 },
             )
+            return
+        if request.get("stream"):
+            self._relay(model)
             return
         self._send(
             200,

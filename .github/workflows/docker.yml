@@ -81,6 +81,9 @@ jobs:
           # CI host, so warn mode must log it and boot regardless — which the
           # health check above already proved.
           docker logs hw-ci 2>&1 | grep -q 'endpoint check: cannot reach'
+          # An endpoint that already failed the HTTP probe must not also hold up
+          # startup for the round trip's own timeout.
+          docker logs hw-ci 2>&1 | grep -q 'skipping the round trip through Pi'
       - name: Verify the endpoint check rejects a bad base URL
         run: |
           # The installer's config-only mode is what the entrypoint runs, so a
@@ -143,6 +146,71 @@ jobs:
             exit 1
           fi
           grep -q 'HEDDLEWORK_OPENAI_PASSWORD is required alongside' "$half"
+      - name: Verify a full round trip through Pi
+        run: |
+          # The HTTP probe only proves the endpoint answers. This proves the
+          # configuration Pi reads works end to end: the installer asks Pi itself
+          # for a one-word answer, against a stub that streams like a real server.
+          docker exec -i hw-ci sh -c 'cat > /tmp/roundtrip-stub.js' <<'JS'
+          const fs = require("node:fs");
+          Bun.serve({
+            port: 8901,
+            hostname: "127.0.0.1",
+            async fetch(req) {
+              const path = new URL(req.url).pathname;
+              fs.appendFileSync("/tmp/roundtrip-stub.log", req.method + " " + path + "\n");
+              if (path.endsWith("/models")) {
+                return Response.json({ object: "list", data: [{ id: "qwen2.5-coder:7b" }] });
+              }
+              if (path.endsWith("/chat/completions")) {
+                const body = await req.json().catch(() => ({}));
+                const encoder = new TextEncoder();
+                const chunk = (payload) =>
+                  encoder.encode("data: " + JSON.stringify(payload) + "\n\n");
+                const stream = new ReadableStream({
+                  start(controller) {
+                    controller.enqueue(
+                      chunk({
+                        id: "chatcmpl-ci",
+                        object: "chat.completion.chunk",
+                        model: body.model,
+                        choices: [{ index: 0, delta: { role: "assistant", content: "pong" }, finish_reason: null }],
+                      }),
+                    );
+                    controller.enqueue(
+                      chunk({
+                        id: "chatcmpl-ci",
+                        object: "chat.completion.chunk",
+                        model: body.model,
+                        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+                      }),
+                    );
+                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                    controller.close();
+                  },
+                });
+                return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+              }
+              return Response.json({ error: { message: "not found" } }, { status: 404 });
+            },
+          });
+          await new Promise(() => {});
+          JS
+          docker exec -d hw-ci bun /tmp/roundtrip-stub.js
+          sleep 3
+
+          log=$(mktemp)
+          docker exec \
+            -e HEDDLEWORK_OPENAI_BASE_URL=http://127.0.0.1:8901/v1 \
+            -e HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+            -e HEDDLEWORK_OPENAI_CHECK=require \
+            hw-ci sh /opt/heddlework/install.sh --write-model-config > "$log" 2>&1
+          cat "$log"
+          grep -q 'endpoint check: ok' "$log"
+          grep -q 'Pi answered "pong"' "$log"
+          # The answer has to come from a real request, not from the probe alone.
+          docker exec hw-ci grep -q 'POST /v1/chat/completions' /tmp/roundtrip-stub.log
       - name: Exercise the pairing protocol (unauthenticated and authenticated)
         run: |
           # The web client must be served and the WebSocket endpoint must reject
