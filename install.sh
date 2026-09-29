@@ -11,7 +11,8 @@
 #         HEDDLEWORK_OPENAI_BASE_URL, HEDDLEWORK_OPENAI_MODEL, HEDDLEWORK_OPENAI_API,
 #         HEDDLEWORK_OPENAI_NAME, HEDDLEWORK_OPENAI_KEY, HEDDLEWORK_OPENAI_USERNAME,
 #         HEDDLEWORK_OPENAI_PASSWORD, HEDDLEWORK_OPENAI_CHECK,
-#         HEDDLEWORK_OPENAI_CHECK_TIMEOUT, HEDDLEWORK_OPENAI_ANSWER_TIMEOUT.
+#         HEDDLEWORK_OPENAI_CHECK_TIMEOUT, HEDDLEWORK_OPENAI_ANSWER_TIMEOUT,
+#         HEDDLEWORK_OPENAI_TOOL_CHECK, HEDDLEWORK_OPENAI_AGENT_CHECK.
 #
 #   ./install.sh --write-model-config   # write models.json from the
 #                                       # HEDDLEWORK_OPENAI_* variables and exit
@@ -469,114 +470,396 @@ run_endpoint_check() {
 }
 
 # ---------------------------------------------------------------------------
-# Round trip through Pi
+# Round trips through Pi
 #
 # The HTTP probe proves the endpoint answers; it does not prove Pi can use the
-# configuration just written. This asks Pi itself for a one-word reply with the
-# provider and model an editor would launch, so a configuration Pi rejects — a
-# header it cannot resolve, a model id it hides, a credential only the probe
-# knew — is reported here, with the model's own words, instead of at the first
-# prompt. It runs after the write because Pi reads models.json and auth.json, so
-# it never gates the write, and it is fatal only in require mode.
+# configuration just written. Three checks ask Pi itself, with the provider and
+# model an editor would launch, so a configuration Pi rejects — a header it
+# cannot resolve, a model id it hides, a credential only the probe knew, a model
+# that cannot call tools, a turn that cannot carry a tool result into the next
+# step — is reported here, with the model's own words, instead of at the first
+# prompt. All three run after the write because Pi reads models.json and
+# auth.json, so none gates the write, and each is fatal only in its require mode.
 # ---------------------------------------------------------------------------
 # A cold local model can take far longer to load than an HTTP probe should wait,
-# hence a separate budget for the answer.
+# hence a separate budget for an answer.
 PI_ANSWER_TIMEOUT=${HEDDLEWORK_OPENAI_ANSWER_TIMEOUT:-60}
 PI_ROUNDTRIP_PROMPT='Reply with the single word: pong'
+PI_TOOL_PROBE_FILE='heddlework-tool-probe.txt'
+PI_TOOL_PROMPT="Read the file $PI_TOOL_PROBE_FILE in the current directory and reply with its exact contents, nothing else."
+# The tool check runs Pi in JSON mode, because text mode prints only the answer,
+# and an answer on its own cannot tell a model that ignored its tools from a
+# toolset that cannot read the probe file. Effectful built-ins are excluded so the
+# probe can never modify anything; read/list/search tools, and extension tools (a
+# pi-fabric session, say, where fabric_exec is the only tool), stay available.
+PI_TOOL_EXCLUDE='bash,edit,write'
+# The agent turn is the session an editor actually runs: read a file, then edit
+# it. The shell stays excluded — the edit is the point, and a shell is what would
+# step outside the scratch directory — so the read/edit/write built-ins and the
+# extension tools (fabric_exec in a pi-fabric session, which reaches the same
+# core tools) all stay available.
+PI_AGENT_PROBE_FILE='heddlework-agent-probe.txt'
+PI_AGENT_EDIT_LINE='heddlework agent turn: edited'
+PI_AGENT_PROMPT="Read the file $PI_AGENT_PROBE_FILE in the current directory, then edit that same file so it keeps its contents and gains one final line reading: $PI_AGENT_EDIT_LINE. Change nothing else. Reply with the single word: done"
+PI_AGENT_EXCLUDE='bash'
 PI_HELP=''
+# Set by run_pi_roundtrip so the tool check only runs when Pi answered at all.
+PI_ROUNDTRIP_OK=''
+# Set by run_pi_tool_roundtrip once the endpoint proved it drives tool calls; the
+# agent turn is the same proof carried further, so it is only worth attempting
+# after this unless HEDDLEWORK_OPENAI_AGENT_CHECK asks for it on its own.
+PI_TOOL_OK=''
+# pi_print_run globals: PI_RUN_OUTPUT selects how the answer is read out of the
+# captured stdout ('json' for a Pi JSON event stream, empty for plain text), and
+# PI_RUN_ANSWER_FILE names that capture so a caller can grep it for evidence
+# before removing the scratch directory.
+PI_RUN_OUTPUT=''
+PI_RUN_ANSWER_FILE=''
 
 # pi_supports <flag> — whether the installed Pi advertises a flag. --print is
 # required to ask for an answer at all; the optional flags are passed only when
 # present, so an older build is still exercised instead of failing on an option
-# it does not know.
+# it does not know. The match stops at a word boundary, because a plain substring
+# test would read --mode out of --model and --exclude-tools out of any longer
+# name, and then pass a flag the build does not have.
 pi_supports() {
   if [ -z "$PI_HELP" ]; then
     PI_HELP=$(pi --help 2>&1 || true)
   fi
-  printf '%s' "$PI_HELP" | grep -q -- "$1"
+  printf '%s' "$PI_HELP" | grep -qE -- "(^|[[:space:]])$1([^a-zA-Z0-9-]|$)"
 }
 
-# run_pi_roundtrip <provider> <model-id>
+# pi_roundtrip_available <what> — whether Pi can be asked at all
+pi_roundtrip_available() {
+  if ! command -v pi >/dev/null 2>&1; then
+    info "endpoint check: skipped the $1 — 'pi' is not on PATH (a full install would have put it there)"
+    return 1
+  fi
+  if ! pi_supports --print; then
+    info "endpoint check: skipped the $1 — this Pi build has no --print mode"
+    return 1
+  fi
+  return 0
+}
+
+# verdict_endpoint_failure <mode> <knob> <message> — require refuses, warn
+# reports and continues.
+verdict_endpoint_failure() {
+  if [ "$1" = warn ]; then
+    warn "continuing anyway ($2=warn); Pi will fail at the first prompt while this persists"
+    return 0
+  fi
+  die "$3"
+}
+
+# pi_print_run <scratch-dir> <prompt> <flag...>
+# Runs the installed Pi in --print mode from <scratch-dir>, bounded by
+# PI_ANSWER_TIMEOUT, and leaves the outcome in PI_RUN_STATUS (empty when Pi never
+# answered), PI_RUN_ANSWER (last non-empty stdout line) and PI_RUN_REASON (last
+# non-empty stderr line). The caller owns the scratch directory.
+#
+# The status goes to a file because a backgrounded `kill -0` cannot tell a
+# running child from an unreaped one; polling the file also bounds the wait
+# without relying on GNU `timeout`, which macOS does not ship. Pi runs from the
+# scratch directory so the installer's working directory adds no context files.
+pi_print_run() {
+  pi_run_dir=$1
+  pi_run_prompt=$2
+  shift 2
+  PI_RUN_STATUS=''
+  PI_RUN_ANSWER=''
+  PI_RUN_REASON=''
+  rm -f "$pi_run_dir/status" "$pi_run_dir/answer" "$pi_run_dir/error"
+  (
+    cd "$pi_run_dir" || exit 1
+    # `|| capture` so a failing Pi still reaches the line that records it, which
+    # `set -e` would otherwise skip along with the status file.
+    pi_run_exit=0
+    PI_CODING_AGENT_DIR="$PI_DIR" pi "$@" --print "$pi_run_prompt" \
+      > "$pi_run_dir/answer" 2> "$pi_run_dir/error" || pi_run_exit=$?
+    printf '%s' "$pi_run_exit" > "$pi_run_dir/status"
+  ) &
+  pi_run_pid=$!
+
+  pi_run_waited=0
+  while [ ! -s "$pi_run_dir/status" ] && [ "$pi_run_waited" -lt "$PI_ANSWER_TIMEOUT" ]; do
+    sleep 1
+    pi_run_waited=$((pi_run_waited + 1))
+  done
+  if [ ! -s "$pi_run_dir/status" ]; then
+    kill "$pi_run_pid" 2>/dev/null || true
+    return 0
+  fi
+  # CR is stripped because Pi may be on Windows; the last non-empty line is the
+  # answer, since a reply can still be preceded by startup notices.
+  PI_RUN_STATUS=$(cat "$pi_run_dir/status") || PI_RUN_STATUS=''
+  PI_RUN_ANSWER_FILE="$pi_run_dir/answer"
+  if [ "${PI_RUN_OUTPUT:-}" = json ]; then
+    # A JSON stream carries one event per line, so the answer is the last text
+    # chunk Pi streamed rather than the last line of output.
+    PI_RUN_ANSWER=$(grep -o '"text":"[^"]*"' "$PI_RUN_ANSWER_FILE" 2>/dev/null | tail -n 1 | sed 's/^"text":"//; s/"$//' | tr -d '\r' | cut -c1-160) || true
+  else
+    PI_RUN_ANSWER=$(tr -d '\r' < "$pi_run_dir/answer" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-160) || true
+  fi
+  PI_RUN_REASON=$(tr -d '\r' < "$pi_run_dir/error" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-300) || true
+  return 0
+}
+
+# run_pi_roundtrip <provider> <model-id> — a one-word answer, the cheapest proof
+# that the written configuration works
 run_pi_roundtrip() {
   roundtrip_provider=$1
   roundtrip_model=$2
-  case "${HEDDLEWORK_OPENAI_CHECK:-require}" in
+  roundtrip_mode=${HEDDLEWORK_OPENAI_CHECK:-require}
+  PI_ROUNDTRIP_OK=''
+  case "$roundtrip_mode" in
     off|no|0) return 0 ;;
   esac
-  if ! command -v pi >/dev/null 2>&1; then
-    info "endpoint check: skipped the round trip — 'pi' is not on PATH (a full install would have put it there)"
-    return 0
-  fi
-  if ! pi_supports --print; then
-    info "endpoint check: skipped the round trip — this Pi build has no --print mode"
-    return 0
-  fi
+  pi_roundtrip_available 'round trip' || return 0
 
-  set -- --provider "$roundtrip_provider" --model "$roundtrip_model" --print "$PI_ROUNDTRIP_PROMPT"
+  set -- --provider "$roundtrip_provider" --model "$roundtrip_model"
   pi_supports --no-session && set -- "$@" --no-session
   pi_supports --no-tools && set -- "$@" --no-tools
   pi_supports --offline && set -- "$@" --offline
 
   roundtrip_dir=$(mktemp -d "${TMPDIR:-/tmp}/heddlework-roundtrip.XXXXXX") || return 0
   info "endpoint check: asking Pi for a one-word answer through $roundtrip_provider/$roundtrip_model"
-  # The status goes to a file because a backgrounded `kill -0` cannot tell a
-  # running child from an unreaped one; polling the file also bounds the wait
-  # without relying on GNU `timeout`, which macOS does not ship. The subshell
-  # runs Pi from a scratch directory so the installer's working directory does
-  # not add context files to the request.
-  (
-    cd "$roundtrip_dir" || exit 1
-    # `|| capture` so a failing Pi still reaches the line that records it, which
-    # `set -e` would otherwise skip along with the status file.
-    roundtrip_exit=0
-    PI_CODING_AGENT_DIR="$PI_DIR" pi "$@" > "$roundtrip_dir/answer" 2> "$roundtrip_dir/error" || roundtrip_exit=$?
-    printf '%s' "$roundtrip_exit" > "$roundtrip_dir/status"
-  ) &
-  roundtrip_pid=$!
-
-  roundtrip_waited=0
-  while [ ! -s "$roundtrip_dir/status" ] && [ "$roundtrip_waited" -lt "$PI_ANSWER_TIMEOUT" ]; do
-    sleep 1
-    roundtrip_waited=$((roundtrip_waited + 1))
-  done
-
-  # CR is stripped because Pi may be on Windows; the last non-empty line is the
-  # answer, since a one-word reply can still be preceded by startup notices.
-  roundtrip_reply=$(tr -d '\r' < "$roundtrip_dir/answer" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-160) || true
-  roundtrip_reason=$(tr -d '\r' < "$roundtrip_dir/error" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-300) || true
-  roundtrip_status=$(cat "$roundtrip_dir/status" 2>/dev/null) || roundtrip_status=''
-
-  if [ -z "$roundtrip_status" ]; then
-    kill "$roundtrip_pid" 2>/dev/null || true
-    rm -rf "$roundtrip_dir"
-    warn "endpoint check: Pi did not answer within ${PI_ANSWER_TIMEOUT}s; a cold local model can take a while to load — raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT if this endpoint is just slow"
-    verdict_pi_roundtrip_failure
-    return $?
-  fi
+  PI_RUN_OUTPUT=''
+  pi_print_run "$roundtrip_dir" "$PI_ROUNDTRIP_PROMPT" "$@"
   rm -rf "$roundtrip_dir"
 
-  if [ "$roundtrip_status" != 0 ]; then
-    warn "endpoint check: Pi could not complete a request through $roundtrip_provider: ${roundtrip_reason:-no error output (exit $roundtrip_status)}"
-    verdict_pi_roundtrip_failure
+  if [ -z "$PI_RUN_STATUS" ]; then
+    warn "endpoint check: Pi did not answer within ${PI_ANSWER_TIMEOUT}s; a cold local model can take a while to load — raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT if this endpoint is just slow"
+    verdict_endpoint_failure "$roundtrip_mode" HEDDLEWORK_OPENAI_CHECK \
+      "the endpoint answered but Pi could not complete a request through it — see the warning above, or set HEDDLEWORK_OPENAI_CHECK=warn to install anyway"
     return $?
   fi
-  if [ -z "$roundtrip_reply" ]; then
-    warn "endpoint check: Pi completed the request but returned no answer${roundtrip_reason:+ (${roundtrip_reason})}"
-    verdict_pi_roundtrip_failure
+  if [ "$PI_RUN_STATUS" != 0 ]; then
+    warn "endpoint check: Pi could not complete a request through $roundtrip_provider: ${PI_RUN_REASON:-no error output (exit $PI_RUN_STATUS)}"
+    verdict_endpoint_failure "$roundtrip_mode" HEDDLEWORK_OPENAI_CHECK \
+      "the endpoint answered but Pi could not complete a request through it — see the warning above, or set HEDDLEWORK_OPENAI_CHECK=warn to install anyway"
     return $?
   fi
-  info "endpoint check: Pi answered \"$roundtrip_reply\""
+  if [ -z "$PI_RUN_ANSWER" ]; then
+    warn "endpoint check: Pi completed the request but returned no answer${PI_RUN_REASON:+ (${PI_RUN_REASON})}"
+    verdict_endpoint_failure "$roundtrip_mode" HEDDLEWORK_OPENAI_CHECK \
+      "the endpoint answered but Pi could not complete a request through it — see the warning above, or set HEDDLEWORK_OPENAI_CHECK=warn to install anyway"
+    return $?
+  fi
+  info "endpoint check: Pi answered \"$PI_RUN_ANSWER\""
+  PI_ROUNDTRIP_OK=1
   return 0
 }
 
-# The shared verdict: require mode refuses an endpoint Pi cannot use, warn mode
-# reports it and continues.
-verdict_pi_roundtrip_failure() {
-  if [ "${HEDDLEWORK_OPENAI_CHECK:-require}" = warn ]; then
-    warn "continuing anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt if this persists"
+# run_pi_tool_roundtrip <provider> <model-id> — proves the endpoint returns tool
+# calls and accepts their results, which is what an agent session needs. Pi runs
+# in JSON mode — asked to read a scratch file whose random contents it cannot
+# otherwise know — and the evidence is read out of that event stream: the token
+# coming back means a tool ran and read the file, which is also what a pi-fabric
+# session manages, since its only tool (fabric_exec) reaches the core read tool
+# as `pi.read(...)`. A tool call Pi dispatched without the file being read still
+# passes, and says so: that endpoint returns tool calls, and this Pi simply
+# exposed nothing that could read the file. Only an answer with no tool call at
+# all — a model that only chats — fails.
+# HEDDLEWORK_OPENAI_TOOL_CHECK overrides the global mode for this check alone,
+# for an endpoint deliberately run chat-only.
+tool_roundtrip_probe() {
+  tool_probe_token=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || tool_probe_token=''
+  [ -n "$tool_probe_token" ] || tool_probe_token="$$-$(date +%s)"
+  printf 'heddlework-tool-check-%s\n' "$tool_probe_token" > "$1/$PI_TOOL_PROBE_FILE"
+  printf '%s' "$tool_probe_token"
+}
+
+run_pi_tool_roundtrip() {
+  tool_provider=$1
+  tool_model=$2
+  PI_TOOL_OK=''
+  tool_mode=${HEDDLEWORK_OPENAI_TOOL_CHECK:-${HEDDLEWORK_OPENAI_CHECK:-require}}
+  tool_mode_knob=HEDDLEWORK_OPENAI_TOOL_CHECK
+  if [ -z "${HEDDLEWORK_OPENAI_TOOL_CHECK:-}" ]; then
+    tool_mode_knob=HEDDLEWORK_OPENAI_CHECK
+  fi
+  case "$tool_mode" in
+    off|no|0)
+      info "$tool_mode_knob=$tool_mode — not proving that the endpoint answers tool calls"
+      return 0 ;;
+  esac
+  pi_roundtrip_available 'tool call check' || return 0
+  # JSON mode is how a tool call becomes observable at all, and --exclude-tools
+  # is what keeps the probe read-only; a build with neither is left alone rather
+  # than guessed at.
+  if ! pi_supports --mode; then
+    info "endpoint check: skipped the tool call check — this Pi build has no --mode json to observe tool calls with"
     return 0
   fi
-  die "the endpoint answered but Pi could not complete a request through it — see the warning above, or set HEDDLEWORK_OPENAI_CHECK=warn to install anyway"
+  if ! pi_supports --exclude-tools; then
+    info "endpoint check: skipped the tool call check — this Pi build has no --exclude-tools to keep the probe read-only"
+    return 0
+  fi
+
+  tool_dir=$(mktemp -d "${TMPDIR:-/tmp}/heddlework-tools.XXXXXX") || return 0
+  tool_expected=$(tool_roundtrip_probe "$tool_dir")
+  set -- --provider "$tool_provider" --model "$tool_model" --mode json --exclude-tools "$PI_TOOL_EXCLUDE"
+  pi_supports --no-session && set -- "$@" --no-session
+  pi_supports --offline && set -- "$@" --offline
+
+  info "endpoint check: asking Pi to read a file with its read-only tools through $tool_provider/$tool_model (an agent session needs tool calls)"
+  PI_RUN_OUTPUT=json
+  pi_print_run "$tool_dir" "$PI_TOOL_PROMPT" "$@"
+
+  # Both answers are read out of the stream before the scratch directory goes:
+  # the file's contents, which only a tool call can have revealed, or any tool
+  # call Pi dispatched at all, which proves the endpoint returned one and took
+  # its result back.
+  tool_read_file=''
+  tool_called=''
+  if [ -n "$PI_RUN_STATUS" ]; then
+    if grep -qF "$tool_expected" "$PI_RUN_ANSWER_FILE" 2>/dev/null; then
+      tool_read_file=1
+    fi
+    if grep -qE '"type":"(toolCall|toolcall_start|tool_execution_start)"' "$PI_RUN_ANSWER_FILE" 2>/dev/null; then
+      tool_called=1
+    fi
+  fi
+  rm -rf "$tool_dir"
+
+  if [ -z "$PI_RUN_STATUS" ]; then
+    warn "endpoint check: Pi did not complete the tool call within ${PI_ANSWER_TIMEOUT}s — raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT if this endpoint is just slow"
+    verdict_endpoint_failure "$tool_mode" "$tool_mode_knob" \
+      "the endpoint could not complete a tool call, which an agent session needs — see the warning above, or set $tool_mode_knob=warn to install anyway"
+    return $?
+  fi
+  if [ "$PI_RUN_STATUS" != 0 ]; then
+    warn "endpoint check: Pi's request with tools failed through $tool_provider: ${PI_RUN_REASON:-no error output (exit $PI_RUN_STATUS)}"
+    warn "endpoint check: a server that rejects the tools field cannot drive an agent session"
+    verdict_endpoint_failure "$tool_mode" "$tool_mode_knob" \
+      "the endpoint could not complete a tool call, which an agent session needs — see the warning above, or set $tool_mode_knob=warn to install anyway"
+    return $?
+  fi
+  if [ -n "$tool_read_file" ]; then
+    info "endpoint check: Pi called a tool and read the file back${PI_RUN_ANSWER:+ — it answered \"$PI_RUN_ANSWER\"}"
+    PI_TOOL_OK=1
+    return 0
+  fi
+  if [ -n "$tool_called" ]; then
+    info "endpoint check: the endpoint returned a tool call and Pi carried its result back${PI_RUN_ANSWER:+ — it answered \"$PI_RUN_ANSWER\"}"
+    info "endpoint check: no tool of this Pi could read the probe file, which is fine — the endpoint drives tool calls either way"
+    # PI_TOOL_OK stays unset here: a turn that edits a file needs a tool that can
+    # read one, so the agent turn would fail on this Pi's toolset rather than on
+    # the endpoint, which is the false failure the line above exists to avoid.
+    return 0
+  fi
+  warn "endpoint check: Pi answered without calling any tool${PI_RUN_ANSWER:+ — \"$PI_RUN_ANSWER\"} — a model that only chats cannot run an agent session"
+  verdict_endpoint_failure "$tool_mode" "$tool_mode_knob" \
+    "the endpoint answered chat but never returned a tool call, which an agent session needs — see the warning above, or set $tool_mode_knob=warn to install anyway"
+  return $?
+}
+
+# run_pi_agent_turn <provider> <model-id> — a whole agent turn, which is what an
+# editor actually runs: Pi is asked to read a scratch file and edit it, and the
+# proof is the file itself rather than the event stream. A model that can call a
+# tool once can still fail to carry a result into the next call, and every
+# editing session does exactly that; the file only changes if the round trips in
+# between worked. The token the file is seeded with has to survive the edit as
+# well, so the read half is proven and not just the write — neither can be faked
+# from the prompt, which never mentions it.
+# Pi runs in JSON mode (so a failure can quote what happened) with the shell
+# excluded, and the scratch directory is Pi's working directory, so the edit is
+# bounded to a file this check made.
+# HEDDLEWORK_OPENAI_AGENT_CHECK overrides the mode for this check alone; unset,
+# it follows the tool call check, and therefore HEDDLEWORK_OPENAI_CHECK with it.
+agent_turn_probe() {
+  agent_probe_token=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || agent_probe_token=''
+  [ -n "$agent_probe_token" ] || agent_probe_token="$$-$(date +%s)"
+  agent_expected="heddlework-agent-turn-$agent_probe_token"
+  printf '%s\n' "$agent_expected" > "$1/$PI_AGENT_PROBE_FILE"
+}
+
+run_pi_agent_turn() {
+  agent_provider=$1
+  agent_model=$2
+  agent_mode=${HEDDLEWORK_OPENAI_AGENT_CHECK:-${HEDDLEWORK_OPENAI_TOOL_CHECK:-${HEDDLEWORK_OPENAI_CHECK:-require}}}
+  agent_mode_knob=HEDDLEWORK_OPENAI_AGENT_CHECK
+  if [ -z "${HEDDLEWORK_OPENAI_AGENT_CHECK:-}" ]; then
+    if [ -n "${HEDDLEWORK_OPENAI_TOOL_CHECK:-}" ]; then
+      agent_mode_knob=HEDDLEWORK_OPENAI_TOOL_CHECK
+    else
+      agent_mode_knob=HEDDLEWORK_OPENAI_CHECK
+    fi
+  fi
+  case "$agent_mode" in
+    off|no|0)
+      info "$agent_mode_knob=$agent_mode — not proving that the endpoint can read a file and edit it"
+      return 0 ;;
+  esac
+  pi_roundtrip_available 'agent turn check' || return 0
+  if ! pi_supports --mode; then
+    info "endpoint check: skipped the agent turn check — this Pi build has no --mode json to observe the turn with"
+    return 0
+  fi
+  if ! pi_supports --exclude-tools; then
+    info "endpoint check: skipped the agent turn check — this Pi build has no --exclude-tools to keep the turn out of a shell"
+    return 0
+  fi
+
+  agent_dir=$(mktemp -d "${TMPDIR:-/tmp}/heddlework-agent.XXXXXX") || return 0
+  agent_turn_probe "$agent_dir"
+  set -- --provider "$agent_provider" --model "$agent_model" --mode json --exclude-tools "$PI_AGENT_EXCLUDE"
+  pi_supports --no-session && set -- "$@" --no-session
+  pi_supports --offline && set -- "$@" --offline
+
+  info "endpoint check: asking Pi to read a file and edit it through $agent_provider/$agent_model (a whole agent turn, not one tool call)"
+  PI_RUN_OUTPUT=json
+  pi_print_run "$agent_dir" "$PI_AGENT_PROMPT" "$@"
+
+  # The evidence is the working directory, read before it goes: whether the file
+  # still holds the token it was seeded with, and whether it changed at all. A
+  # turn the endpoint never finished leaves both unset.
+  agent_read=''
+  agent_edited=''
+  agent_called=''
+  if [ -n "$PI_RUN_STATUS" ]; then
+    agent_now=$(cat "$agent_dir/$PI_AGENT_PROBE_FILE" 2>/dev/null) || agent_now=''
+    if [ -n "$agent_now" ] && [ "$agent_now" != "$agent_expected" ]; then
+      agent_edited=1
+    fi
+    case "$agent_now" in
+      *"$agent_expected"*) agent_read=1 ;;
+    esac
+    if grep -qE '"type":"(toolCall|toolcall_start|tool_execution_start)"' "$PI_RUN_ANSWER_FILE" 2>/dev/null; then
+      agent_called=1
+    fi
+  fi
+  rm -rf "$agent_dir"
+
+  if [ -z "$PI_RUN_STATUS" ]; then
+    warn "endpoint check: Pi did not finish the agent turn within ${PI_ANSWER_TIMEOUT}s — raise HEDDLEWORK_OPENAI_ANSWER_TIMEOUT if this endpoint is just slow"
+    verdict_endpoint_failure "$agent_mode" "$agent_mode_knob" \
+      "the endpoint could not finish a turn that edits a file, which is what an editor session does — see the warning above, or set $agent_mode_knob=warn to install anyway"
+    return $?
+  fi
+  if [ "$PI_RUN_STATUS" != 0 ]; then
+    warn "endpoint check: Pi's agent turn failed through $agent_provider: ${PI_RUN_REASON:-no error output (exit $PI_RUN_STATUS)}"
+    verdict_endpoint_failure "$agent_mode" "$agent_mode_knob" \
+      "the endpoint could not finish a turn that edits a file, which is what an editor session does — see the warning above, or set $agent_mode_knob=warn to install anyway"
+    return $?
+  fi
+  if [ -n "$agent_read" ] && [ -n "$agent_edited" ]; then
+    info "endpoint check: Pi read the file and edited it back${PI_RUN_ANSWER:+ — it answered \"$PI_RUN_ANSWER\"}"
+    return 0
+  fi
+  if [ -n "$agent_edited" ]; then
+    info "endpoint check: Pi edited the probe file${PI_RUN_ANSWER:+ — it answered \"$PI_RUN_ANSWER\"}"
+    info "endpoint check: the contents it had to read back did not survive that edit, so only the write half of the turn is proven"
+    return 0
+  fi
+  warn "endpoint check: Pi finished the turn without editing the probe file${PI_RUN_ANSWER:+ — \"$PI_RUN_ANSWER\"} — a session that has to change a file would do nothing"
+  if [ -n "$agent_called" ]; then
+    info "endpoint check: it did return tool calls, so the endpoint drives tools; it just never wrote this file"
+  fi
+  verdict_endpoint_failure "$agent_mode" "$agent_mode_knob" \
+    "the endpoint could not finish a turn that edits a file, which is what an editor session does — see the warning above, or set $agent_mode_knob=warn to install anyway"
+  return $?
 }
 
 write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model-ids> [key] [username] [password]
@@ -654,10 +937,23 @@ write_custom_endpoint() { # write_custom_endpoint <name> <base-url> <api> <model
   fi
 
   if [ "$ENDPOINT_CHECK_STATUS" = 1 ]; then
-    info "endpoint check: skipping the round trip through Pi — the endpoint did not answer the HTTP probe"
+    info "endpoint check: skipping the round trips through Pi — the endpoint did not answer the HTTP probe"
     return 0
   fi
   run_pi_roundtrip "$custom_name" "$CUSTOM_ENDPOINT_MODEL"
+  if [ "$PI_ROUNDTRIP_OK" = 1 ]; then
+    # Only worth proving tool support once Pi can complete a request at all.
+    run_pi_tool_roundtrip "$custom_name" "$CUSTOM_ENDPOINT_MODEL"
+  fi
+  # A tool call is the floor; the turn an editor actually runs is a read feeding
+  # an edit, so it is proven while the endpoint is still right here. It follows
+  # the tool call check — a Pi that could not read a file cannot be judged on an
+  # edit — and HEDDLEWORK_OPENAI_AGENT_CHECK asks for it on its own when that
+  # check was turned off.
+  if [ "$PI_ROUNDTRIP_OK" = 1 ] \
+    && { [ "$PI_TOOL_OK" = 1 ] || [ -n "${HEDDLEWORK_OPENAI_AGENT_CHECK:-}" ]; }; then
+    run_pi_agent_turn "$custom_name" "$CUSTOM_ENDPOINT_MODEL"
+  fi
 }
 
 write_custom_endpoint_from_env() {
@@ -888,6 +1184,20 @@ Custom OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, LiteLLM, a gateway):
   HEDDLEWORK_OPENAI_ANSWER_TIMEOUT seconds Pi may take to answer through the
                                 endpoint (default 60; a cold local model can
                                 take a while to load)
+  HEDDLEWORK_OPENAI_TOOL_CHECK  require|warn|off for the tool call check alone
+                                (default: follows HEDDLEWORK_OPENAI_CHECK). Pi
+                                runs in --mode json and is asked to read a
+                                scratch file, with bash/edit/write excluded, so
+                                neither a model that only chats nor an endpoint
+                                that rejects the tools field can run an agent
+                                session unnoticed
+  HEDDLEWORK_OPENAI_AGENT_CHECK  require|warn|off for the agent turn alone
+                                (default: follows HEDDLEWORK_OPENAI_TOOL_CHECK,
+                                which follows HEDDLEWORK_OPENAI_CHECK). Pi is
+                                asked to read a scratch file and then edit it,
+                                with the shell excluded, and the file itself is
+                                the proof, so a session that cannot carry an
+                                edit through is caught before the first prompt
 
 Examples:
   ./install.sh                    # interactive menu

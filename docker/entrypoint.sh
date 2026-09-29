@@ -53,10 +53,12 @@ fi
 # same HEDDLEWORK_OPENAI_* variables; the workspace user takes ownership of the
 # files afterwards so they stay editable inside the container.
 #
-# The endpoint is probed but never fatal here: the server it points at often
-# starts after the container does (or lives on the host behind
-# host.docker.internal), and a container that refuses to boot is worse than a
-# logged warning. Set HEDDLEWORK_OPENAI_CHECK=require to make it fatal anyway.
+# The endpoint is probed, and then exercised through Pi itself — a chat answer,
+# a tool call, and a whole turn that reads a file and edits it — but none of it
+# is fatal here: the server it points at often starts after the container does
+# (or lives on the host behind host.docker.internal), and a container that
+# refuses to boot is worse than a logged warning. Set
+# HEDDLEWORK_OPENAI_CHECK=require to make it fatal anyway.
 if [ -n "${HEDDLEWORK_OPENAI_BASE_URL:-}" ]; then
   HEDDLEWORK_OPENAI_CHECK=${HEDDLEWORK_OPENAI_CHECK:-warn}
   export HEDDLEWORK_OPENAI_CHECK

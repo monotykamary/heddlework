@@ -41,6 +41,16 @@ services:
       # The endpoint is probed at startup; warn (default here) logs a bad URL or
       # model id instead of refusing to boot, require makes it fatal, off skips.
       HEDDLEWORK_OPENAI_CHECK: ${HEDDLEWORK_OPENAI_CHECK:-warn}
+      # Seconds Pi may take to answer through the endpoint (a cold local model
+      # can be slower to load than the probe's own timeout).
+      HEDDLEWORK_OPENAI_ANSWER_TIMEOUT: ${HEDDLEWORK_OPENAI_ANSWER_TIMEOUT:-60}
+      # A tool call is proved too, since chat alone cannot drive an agent
+      # session; follows HEDDLEWORK_OPENAI_CHECK unless set here.
+      HEDDLEWORK_OPENAI_TOOL_CHECK: ${HEDDLEWORK_OPENAI_TOOL_CHECK:-}
+      # And a whole agent turn — Pi reads a scratch file and edits it — since a
+      # session that cannot carry an edit through does nothing in an editor;
+      # follows HEDDLEWORK_OPENAI_TOOL_CHECK unless set here.
+      HEDDLEWORK_OPENAI_AGENT_CHECK: ${HEDDLEWORK_OPENAI_AGENT_CHECK:-}
       # API keys are read by Pi at runtime; pass only what you use.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

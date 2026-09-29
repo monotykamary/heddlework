@@ -146,11 +146,14 @@ jobs:
             exit 1
           fi
           grep -q 'HEDDLEWORK_OPENAI_PASSWORD is required alongside' "$half"
-      - name: Verify a full round trip through Pi
+      - name: Verify full round trips through Pi (chat, tool calls, and an agent turn)
         run: |
           # The HTTP probe only proves the endpoint answers. This proves the
           # configuration Pi reads works end to end: the installer asks Pi itself
-          # for a one-word answer, against a stub that streams like a real server.
+          # for a one-word answer, then for a tool call, then for a whole agent
+          # turn — read a file, then edit it — against a stub that streams like a
+          # real server and answers the way this image's pi-fabric seed has to,
+          # through fabric_exec and its pi.read/pi.write.
           docker exec -i hw-ci sh -c 'cat > /tmp/roundtrip-stub.js' <<'JS'
           const fs = require("node:fs");
           Bun.serve({
@@ -164,28 +167,94 @@ jobs:
               }
               if (path.endsWith("/chat/completions")) {
                 const body = await req.json().catch(() => ({}));
+                const messages = body.messages || [];
+                const toolNames = (body.tools || []).map((t) => (t.function || {}).name);
+                fs.appendFileSync(
+                  "/tmp/roundtrip-stub.log",
+                  "  tools=" + (toolNames.join(",") || "none") + " msgs=" + messages.map((m) => m.role).join("/") + "\n",
+                );
                 const encoder = new TextEncoder();
                 const chunk = (payload) =>
                   encoder.encode("data: " + JSON.stringify(payload) + "\n\n");
+                // The prompt says which run this is: the tool check asks for a
+                // read, the agent turn asks for a read and an edit.
+                const agentTurn = messages.some(
+                  (m) => m.role === "user" && JSON.stringify(m.content).includes("heddlework-agent-probe.txt"),
+                );
                 const stream = new ReadableStream({
                   start(controller) {
-                    controller.enqueue(
-                      chunk({
-                        id: "chatcmpl-ci",
-                        object: "chat.completion.chunk",
-                        model: body.model,
-                        choices: [{ index: 0, delta: { role: "assistant", content: "pong" }, finish_reason: null }],
-                      }),
-                    );
-                    controller.enqueue(
-                      chunk({
-                        id: "chatcmpl-ci",
-                        object: "chat.completion.chunk",
-                        model: body.model,
-                        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-                        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                      }),
-                    );
+                    const toolResult = [...messages].reverse().find((m) => m.role === "tool");
+                    if (toolResult) {
+                      // The tool ran: a model that read the file would answer with
+                      // what it returned, which is what the tool check looks for.
+                      const token = JSON.stringify(toolResult.content).match(/heddlework-tool-check-[a-f0-9]+/);
+                      controller.enqueue(
+                        chunk({
+                          id: "chatcmpl-ci",
+                          object: "chat.completion.chunk",
+                          model: body.model,
+                          choices: [{ index: 0, delta: { role: "assistant", content: agentTurn ? "done" : token ? token[0] : "no token" }, finish_reason: null }],
+                        }),
+                      );
+                    } else if (toolNames.length) {
+                      // A session that advertises tools gets a tool call. In this
+                      // image the pi-fabric seed leaves fabric_exec as the only
+                      // one: it reaches the core read tool as pi.read(...), and an
+                      // edit as pi.write(...), which is what makes the edit the
+                      // agent turn asks for actually land on the probe file.
+                      const tool = toolNames.includes("read")
+                        ? "read"
+                        : toolNames.includes("fabric_exec")
+                          ? "fabric_exec"
+                          : toolNames[0];
+                      const code = agentTurn
+                        ? "const before = await pi.read('heddlework-agent-probe.txt');" +
+                          " await pi.write('heddlework-agent-probe.txt', before.trimEnd() + '\\nedited');" +
+                          " return 'done';"
+                        : "return await pi.read('heddlework-tool-probe.txt')";
+                      const args =
+                        tool === "read"
+                          ? { path: "heddlework-tool-probe.txt" }
+                          : { code };
+                      fs.appendFileSync(
+                        "/tmp/roundtrip-stub.log",
+                        "  tool=" + tool + " agent=" + (agentTurn ? "yes" : "no") + " code=" + (code.includes("pi.write") ? "read+write" : "read") + "\n",
+                      );
+                      controller.enqueue(
+                        chunk({
+                          id: "chatcmpl-ci",
+                          object: "chat.completion.chunk",
+                          model: body.model,
+                          choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_ci_1", type: "function", function: { name: tool, arguments: JSON.stringify(args) } }] }, finish_reason: null }],
+                        }),
+                      );
+                      controller.enqueue(
+                        chunk({
+                          id: "chatcmpl-ci",
+                          object: "chat.completion.chunk",
+                          model: body.model,
+                          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+                        }),
+                      );
+                    } else {
+                      controller.enqueue(
+                        chunk({
+                          id: "chatcmpl-ci",
+                          object: "chat.completion.chunk",
+                          model: body.model,
+                          choices: [{ index: 0, delta: { role: "assistant", content: "pong" }, finish_reason: null }],
+                        }),
+                      );
+                      controller.enqueue(
+                        chunk({
+                          id: "chatcmpl-ci",
+                          object: "chat.completion.chunk",
+                          model: body.model,
+                          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+                        }),
+                      );
+                    }
                     controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                     controller.close();
                   },
@@ -209,8 +278,23 @@ jobs:
           cat "$log"
           grep -q 'endpoint check: ok' "$log"
           grep -q 'Pi answered "pong"' "$log"
-          # The answer has to come from a real request, not from the probe alone.
+          # The tool check passes on either evidence: the probe file's contents
+          # coming back (what a tool that read it produces) or a tool call Pi
+          # carried a result back for.
+          grep -qE 'endpoint check: (Pi called a tool and read the file back|the endpoint returned a tool call)' "$log"
+          # The agent turn is the whole session: Pi read a file and edited it, and
+          # the file it changed is the proof. The stub's log shows the two tool
+          # calls that got it there were answered for the right prompt, so an
+          # endpoint that cannot carry a result into the next call would fail
+          # here rather than at the first prompt in the workspace.
+          grep -q 'asking Pi to read a file and edit it through custom-openai/qwen2.5-coder:7b' "$log"
+          grep -q 'Pi read the file and edited it back' "$log"
+          # The answers have to come from real requests, not from the probe alone.
           docker exec hw-ci grep -q 'POST /v1/chat/completions' /tmp/roundtrip-stub.log
+          # ... and the tool check has to have sent a request carrying the tool's
+          # result, which is the round trip an agent session depends on.
+          docker exec hw-ci grep -q 'msgs=system/user/assistant/tool' /tmp/roundtrip-stub.log
+          docker exec hw-ci grep -q 'tool=fabric_exec agent=yes code=read+write' /tmp/roundtrip-stub.log
       - name: Exercise the pairing protocol (unauthenticated and authenticated)
         run: |
           # The web client must be served and the WebSocket endpoint must reject

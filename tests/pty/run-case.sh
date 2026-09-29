@@ -51,7 +51,9 @@ CASE_HARNESS_ARGS=()
 #         eof-default bun-prompt-decline bun-install-accept auth-write
 #         custom-endpoint custom-endpoint-prompt custom-endpoint-basic
 #         custom-endpoint-basic-prompt endpoint-check endpoint-check-fail
-#         endpoint-roundtrip endpoint-roundtrip-fail desktop-launcher
+#         endpoint-roundtrip endpoint-roundtrip-fail
+#         endpoint-tool-roundtrip-fail endpoint-tool-call-no-file
+#         endpoint-agent-turn-fail desktop-launcher
 
 run_steps() { # steps-file extra-env...
   local steps=$1; shift
@@ -344,11 +346,12 @@ case "$CASE" in
     pass "prompt collected username and password, kept the password hidden, and verified it"
     ;;
 
-  # The round trip through Pi: after writing the configuration, the installer
+  # The round trips through Pi: after writing the configuration, the installer
   # asks the actual CLI for a one-word answer with the provider and model it just
-  # wrote, so a configuration Pi cannot use is reported here, with the model's
-  # words, instead of at the first prompt. The mock pi answers from the
-  # environment and records the argv it was handed.
+  # wrote, then for a tool call, then for a whole agent turn, so a configuration
+  # Pi cannot use is reported here, with the model's words, instead of at the
+  # first prompt. The mock pi answers from the environment and records the argv
+  # it was handed.
   endpoint-roundtrip)
     CASE_HARNESS_ARGS=(--write-model-config)
     need_real_node endpoint-roundtrip
@@ -356,25 +359,59 @@ case "$CASE" in
     start_endpoint "qwen2.5-coder:7b"
     : > "$WORK/pi-argv.log"
 
-    printf 'WAIT:Pi answered\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    printf 'WAIT:and read the file back\nWAIT:custom-openai ->\n' > "$WORK/steps"
     run_steps "$WORK/steps" \
       HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
       HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
       HEDDLEWORK_OPENAI_KEY=sk-roundtrip-1 \
-      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" || fail "the round trip failed"
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" \
+      PI_MOCK_TOOL_READ=heddlework-tool-probe.txt || fail "the round trips failed"
     grep -q 'asking Pi for a one-word answer through custom-openai/qwen2.5-coder:7b' "$LOG" \
-      || fail "the round trip was not announced"
+      || fail "the chat round trip was not announced"
     grep -q 'Pi answered "pong"' "$LOG" || fail "the answer was not reported"
 
-    # It must ask for the provider and model it wrote, without touching sessions,
-    # tools, or the network beyond the endpoint.
+    # The chat check must ask for the provider and model it wrote, without
+    # touching sessions, tools, or the network beyond the endpoint.
     argv=$(cat "$WORK/pi-argv.log")
-    printf '%s\n' "$argv" | grep -q -- '--provider custom-openai --model qwen2.5-coder:7b --print Reply with the single word: pong' \
-      || fail "the round trip did not use the configured provider and model: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--provider custom-openai --model qwen2.5-coder:7b' \
+      || fail "the round trips did not use the configured provider and model: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--print Reply with the single word: pong' \
+      || fail "the chat round trip did not ask the one-word question: $argv"
     printf '%s\n' "$argv" | grep -q -- '--no-session' || fail "--no-session was not passed: $argv"
     printf '%s\n' "$argv" | grep -q -- '--no-tools' || fail "--no-tools was not passed: $argv"
     printf '%s\n' "$argv" | grep -q -- '--offline' || fail "--offline was not passed: $argv"
     [ -s "$PI_CODING_AGENT_DIR/models.json" ] || fail "the configuration was not written"
+
+    # The tool check asks Pi to read a scratch file — in JSON mode, so the tool
+    # call is observable, and with the effectful built-ins excluded, so the probe
+    # cannot modify anything — and accepts the answer only when it carries the
+    # token that file holds, which no chat-only model could know.
+    printf '%s\n' "$argv" | grep -q -- '--mode json' \
+      || fail "the tool check did not ask for JSON mode: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--exclude-tools bash,edit,write' \
+      || fail "the tool check did not exclude the effectful tools: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--print Read the file heddlework-tool-probe.txt' \
+      || fail "the tool check did not name the probe file: $argv"
+    grep -q 'asking Pi to read a file with its read-only tools through custom-openai/qwen2.5-coder:7b' "$LOG" \
+      || fail "the tool check was not announced"
+    # The token the mock answered with can only have come from the probe file the
+    # installer created in its scratch directory, so its presence is the proof.
+    grep -q 'Pi called a tool and read the file back — it answered "heddlework-tool-check-' "$LOG" \
+      || fail "the tool call answer was not reported:" "$(tr -d '\r' < "$LOG" | grep -a 'tool' | head -3)"
+
+    # The agent turn is the session an editor actually runs — read a file, then
+    # edit it — so this time the shell alone stays excluded and the mock, which
+    # plays the model and its tools, really edits the probe file in the scratch
+    # working directory. The file changing is the proof, and the token it had to
+    # read surviving the edit is what proves the read half too.
+    printf '%s\n' "$argv" | grep -q -- '--mode json --exclude-tools bash --' \
+      || fail "the agent turn did not run in JSON mode with only the shell excluded: $argv"
+    printf '%s\n' "$argv" | grep -q -- '--print Read the file heddlework-agent-probe.txt' \
+      || fail "the agent turn did not ask for the probe file to be read: $argv"
+    grep -q 'asking Pi to read a file and edit it through custom-openai/qwen2.5-coder:7b' "$LOG" \
+      || fail "the agent turn was not announced"
+    grep -q 'Pi read the file and edited it back — it answered "done"' "$LOG" \
+      || fail "the agent turn did not report the file as read and edited"
 
     # A real Pi asks for a server-sent-event stream, which is why the stub answers
     # one; prove that route streams and terminates the way Pi expects.
@@ -393,7 +430,223 @@ case "$CASE" in
       HEDDLEWORK_OPENAI_CHECK=off \
       PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" || fail "off mode exited non-zero"
     [ -s "$WORK/pi-argv.log" ] && fail "off mode still ran Pi"
-    pass "Pi was asked for an answer with the written provider and model, and off skipped it"
+    pass "Pi answered, then read a file through a tool call, then read and edited a file — with the written provider and model"
+    ;;
+
+  # A pi-fabric session registers one tool (fabric_exec) that cannot read the
+  # probe file, so the strongest evidence is out of reach there even though the
+  # endpoint does return tool calls. The weaker evidence — a tool call Pi
+  # dispatched and carried a result back for — has to be enough, or the check
+  # would refuse a working endpoint. This is the shape the container's seeded
+  # agent directory produces.
+  endpoint-tool-call-no-file)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-tool-call-no-file
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    : > "$WORK/pi-argv.log"
+
+    printf 'WAIT:returned a tool call and Pi carried its result back\nWAIT:custom-openai ->\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      HEDDLEWORK_OPENAI_BASE_URL="$ENDPOINT_URL" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-2 \
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" \
+      PI_MOCK_TOOL_CALL=1 \
+      PI_MOCK_TOOL_REPLY='I cannot read files.' || fail "a tool call without a file read should still install"
+    grep -q 'the endpoint returned a tool call and Pi carried its result back' "$LOG" \
+      || fail "the tool call was not reported as the proof"
+    grep -q 'no tool of this Pi could read the probe file' "$LOG" \
+      || fail "the check did not explain why the file itself was not read"
+    grep -q 'never returned a tool call' "$LOG" && fail "a dispatched tool call was reported as a failure"
+    [ -s "$PI_CODING_AGENT_DIR/models.json" ] || fail "the configuration was not written"
+    pass "a tool call that could not read the probe file still proved tool support"
+    ;;
+
+  # An endpoint that answers chat but never returns a tool call: an agent session
+  # would stall on the first thing it needs to do. HEDDLEWORK_OPENAI_TOOL_CHECK is
+  # the narrow escape for an endpoint deliberately run chat-only.
+  endpoint-tool-roundtrip-fail)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-tool-roundtrip-fail
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    common_url="HEDDLEWORK_OPENAI_BASE_URL=$ENDPOINT_URL"
+    : > "$WORK/pi-argv.log"
+
+    # A model that only chats: Pi exits 0 with an answer, no tool call anywhere
+    # in the stream, and the tools it was offered unused.
+    printf 'WAIT:never returned a tool call\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-1 \
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" \
+      PI_MOCK_TOOL_REPLY='I cannot read files.'
+    grep -q 'answered without calling any tool — "I cannot read files."' "$LOG" \
+      || fail "an answer with no tool call was not reported as such"
+    grep -q 'a model that only chats cannot run an agent session' "$LOG" \
+      || fail "the consequence was not explained"
+    # The chat check still has to pass first, or this failure would be its own.
+    grep -q 'Pi answered "pong"' "$LOG" || fail "the chat round trip did not run before the tool check"
+
+    # The escape hatch: warn reports the same thing and installs.
+    printf 'WAIT:HEDDLEWORK_OPENAI_TOOL_CHECK=warn\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-1 \
+      HEDDLEWORK_OPENAI_TOOL_CHECK=warn \
+      PI_MOCK_TOOL_REPLY='I cannot read files.' || fail "tool check warn mode should still install"
+    grep -q 'continuing anyway (HEDDLEWORK_OPENAI_TOOL_CHECK=warn)' "$LOG" \
+      || fail "warn mode did not name the knob that controls it"
+    [ -s "$PI_CODING_AGENT_DIR/models.json" ] || fail "warn mode should have written the config"
+
+    # off skips the tool check while the chat round trip still runs.
+    : > "$WORK/pi-argv.log"
+    printf 'WAIT:not proving that the endpoint answers tool calls\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-1 \
+      HEDDLEWORK_OPENAI_TOOL_CHECK=off \
+      PI_MOCK_ARGV_LOG="$WORK/pi-argv.log" || fail "tool check off mode exited non-zero"
+    grep -q 'Pi answered "pong"' "$LOG" || fail "off mode should still run the chat round trip"
+    grep -q -- '--mode json' "$WORK/pi-argv.log" && fail "off mode still ran the tool check"
+
+    # A Pi build too old for JSON mode or --exclude-tools cannot be judged: the
+    # check skips itself rather than failing an endpoint it cannot observe.
+    printf 'WAIT:skipped the tool call check\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-1 \
+      PI_MOCK_LEGACY_HELP=1 || fail "a Pi without --mode json should still install"
+    grep -q 'has no --mode json to observe tool calls with' "$LOG" \
+      || fail "the skip was not explained"
+
+    # An endpoint that rejects the tools field outright: Pi's own error is what
+    # the user needs, since the listing and plain chat both worked.
+    printf 'WAIT:request with tools failed\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-tool-1 \
+      PI_MOCK_TOOL_EXIT=1 \
+      PI_MOCK_TOOL_STDERR='400: tools are not supported by this deployment'
+    grep -q "Pi's request with tools failed through custom-openai: 400: tools are not supported by this deployment" "$LOG" \
+      || fail "the endpoint's own tools error was not reported"
+    grep -q 'a server that rejects the tools field cannot drive an agent session' "$LOG" \
+      || fail "the consequence of rejecting tools was not explained"
+    pass "a chat-only model and a rejected tools field both failed the install, and the escape hatches worked"
+    ;;
+
+  # The agent turn's other shapes. Proving a whole turn must not invent failures:
+  # a turn that wrote the file but lost the contents it read still shows the
+  # endpoint can edit, an endpoint that never edits is caught, and the knobs have
+  # to line up — the turn follows the tool call check, which is what makes an
+  # edit meaningful, and HEDDLEWORK_OPENAI_AGENT_CHECK can ask for it anyway.
+  endpoint-agent-turn-fail)
+    CASE_HARNESS_ARGS=(--write-model-config)
+    need_real_node endpoint-agent-turn-fail
+    trap 'stop_endpoint' EXIT
+    start_endpoint "qwen2.5-coder:7b"
+    common_url="HEDDLEWORK_OPENAI_BASE_URL=$ENDPOINT_URL"
+    argv_log="$WORK/pi-argv.log"
+
+    # A blind write: the file changed, so the endpoint edits files, but the token
+    # the turn had to read back did not survive — the write half alone, which is
+    # not a failure.
+    printf 'WAIT:only the write half\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      PI_MOCK_AGENT_BLIND=1 || fail "a write-only turn should still install"
+    grep -q 'Pi edited the probe file' "$LOG" || fail "the write was not reported"
+    grep -q 'did not survive that edit, so only the write half of the turn is proven' "$LOG" \
+      || fail "the lost read was not reported"
+
+    # A turn that never edits anything: the session an editor runs would do
+    # nothing at all, so require mode refuses the endpoint.
+    printf 'WAIT:without editing the probe file\n' > "$WORK/steps"
+    run_failing_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      PI_MOCK_AGENT_NO_EDIT=1
+    grep -q 'Pi finished the turn without editing the probe file — "I have not changed the file."' "$LOG" \
+      || fail "a turn that never edited was not reported"
+    grep -q 'a session that has to change a file would do nothing' "$LOG" \
+      || fail "the consequence was not explained"
+    grep -q 'it did return tool calls, so the endpoint drives tools; it just never wrote this file' "$LOG" \
+      || fail "the tool calls the turn did make were not acknowledged"
+    grep -q 'the endpoint could not finish a turn that edits a file' "$LOG" \
+      || fail "require mode did not refuse the endpoint"
+    [ -s "$PI_CODING_AGENT_DIR/models.json" ] || fail "the agent turn should run after the write, not instead of it"
+
+    # warn reports the same thing and installs, naming the knob it takes.
+    printf 'WAIT:HEDDLEWORK_OPENAI_AGENT_CHECK=warn\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      HEDDLEWORK_OPENAI_AGENT_CHECK=warn \
+      PI_MOCK_AGENT_NO_EDIT=1 || fail "agent check warn mode should still install"
+    grep -q 'continuing anyway (HEDDLEWORK_OPENAI_AGENT_CHECK=warn)' "$LOG" \
+      || fail "warn mode did not name the knob that controls the agent turn"
+
+    # off skips the turn while the tool call check still runs.
+    : > "$argv_log"
+    printf 'WAIT:not proving that the endpoint can read a file and edit it\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      HEDDLEWORK_OPENAI_AGENT_CHECK=off \
+      PI_MOCK_ARGV_LOG="$argv_log" || fail "agent check off mode exited non-zero"
+    grep -q 'asking Pi to read a file and edit it' "$LOG" && fail "off mode still ran the agent turn"
+    grep -q -- '--exclude-tools bash,edit,write' "$argv_log" \
+      || fail "off mode should still run the tool call check: $(cat "$argv_log")"
+
+    # The turn follows the tool call check, because an edit is only meaningful
+    # once a tool call has been proven: with that check off and no agent knob,
+    # nothing asks for a file to be edited.
+    : > "$argv_log"
+    printf 'WAIT:not proving that the endpoint answers tool calls\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      HEDDLEWORK_OPENAI_TOOL_CHECK=off \
+      PI_MOCK_ARGV_LOG="$argv_log" || fail "tool check off mode exited non-zero"
+    grep -q 'asking Pi to read a file and edit it' "$LOG" \
+      && fail "the agent turn ran although the tool call check was off"
+
+    # ... unless the agent knob asks for the turn by name.
+    printf 'WAIT:read the file and edited it back\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      HEDDLEWORK_OPENAI_TOOL_CHECK=off \
+      HEDDLEWORK_OPENAI_AGENT_CHECK=require \
+      PI_MOCK_ARGV_LOG="$argv_log" || fail "an explicit agent check should run the turn"
+    grep -q 'Pi read the file and edited it back' "$LOG" \
+      || fail "an explicit agent check did not prove the turn"
+
+    # A Pi build too old for --mode json is not judged on a turn it cannot
+    # observe, the same way the tool call check is not.
+    printf 'WAIT:skipped the agent turn check\n' > "$WORK/steps"
+    run_steps "$WORK/steps" \
+      "$common_url" \
+      HEDDLEWORK_OPENAI_MODEL=qwen2.5-coder:7b \
+      HEDDLEWORK_OPENAI_KEY=sk-agent-1 \
+      HEDDLEWORK_OPENAI_AGENT_CHECK=require \
+      PI_MOCK_LEGACY_HELP=1 || fail "a Pi without --mode json should still install"
+    grep -q 'has no --mode json to observe the turn with' "$LOG" \
+      || fail "the agent turn skip was not explained"
+    pass "a write-only turn passed, a turn that never edited failed, and the agent knob gated the turn"
     ;;
 
   # What the round trip reports when Pi cannot use the endpoint: its own error,
@@ -431,7 +684,7 @@ case "$CASE" in
       HEDDLEWORK_OPENAI_CHECK=warn \
       PI_MOCK_EXIT=1 \
       PI_MOCK_STDERR='No API key for provider: custom-openai' || fail "warn mode should still install"
-    grep -q 'continuing anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt if this persists' "$LOG" \
+    grep -q 'continuing anyway (HEDDLEWORK_OPENAI_CHECK=warn); Pi will fail at the first prompt while this persists' "$LOG" \
       || fail "warn mode did not explain the consequence"
 
     # A clean exit with nothing to say is not an answer either.
