@@ -28,6 +28,8 @@
     "start": "bun src/main.tsx",
     "demo": "HEDDLEWORK_DEMO=1 bun --watch src/main.tsx",
     "host": "bun src/host/main.ts",
+    "ssh": "bun scripts/heddlework-ssh.ts",
+    "remote": "bun src/remote-main.tsx",
     "setup:native": "bun scripts/install-gpuix.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:web": "tsc --noEmit -p src/web",

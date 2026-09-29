@@ -16,6 +16,14 @@ type TerminalCapableRenderer = {
   setTerminalFrame?: (elementId: number, metadata: string, cells: Uint8Array) => void
 }
 
+export type TerminalSurface = 'none' | 'native' | 'grid' | 'empty'
+export function terminalSurface(state: { projectionSuspended: boolean; nativeTerminal: boolean; directTerminal: boolean; sessionReady: boolean; hasSnapshot: boolean }): TerminalSurface {
+  if (state.projectionSuspended) return 'none'
+  // Direct frames pull the grid from the service, so a session whose first frame is still in flight (remote hosts) mounts too.
+  if (state.nativeTerminal && (state.hasSnapshot || (state.directTerminal && state.sessionReady))) return 'native'
+  return state.hasSnapshot ? 'grid' : 'empty'
+}
+
 export const TerminalView = memo(function TerminalView({
   service,
   sessionId,
@@ -43,6 +51,7 @@ export const TerminalView = memo(function TerminalView({
   const sessionReady = serviceSnapshot.sessions.some((session) => session.id === sessionId)
   const rendering = serviceSnapshot.appearance
   const snapshot = useTerminalGrid(service, sessionId, projectionSuspended || directTerminal)
+  const surface = terminalSurface({ projectionSuspended, nativeTerminal, directTerminal, sessionReady, hasSnapshot: snapshot !== undefined })
   const theme = useMemo(() => terminalPaintTheme(appearance), [appearance])
   const size = terminalGridSize(width, height)
   const sizeRef = useRef(size)
@@ -129,7 +138,7 @@ export const TerminalView = memo(function TerminalView({
       onClick={focusInput}
       onScroll={onScroll}
     >
-      {projectionSuspended ? null : snapshot ? (nativeTerminal
+      {surface === 'native'
         ? <NativeTerminalGrid
             service={service}
             sessionId={sessionId!}
@@ -139,8 +148,9 @@ export const TerminalView = memo(function TerminalView({
             theme={theme}
             rendering={rendering}
           />
-        : <TerminalGrid snapshot={snapshot} theme={theme} rendering={rendering} />
-      ) : <text style={{ color: colors.textFaint, fontSize: 11 }}>No terminal session.</text>}
+        : surface === 'grid' && snapshot ? <TerminalGrid snapshot={snapshot} theme={theme} rendering={rendering} />
+        : surface === 'empty' ? <text style={{ color: colors.textFaint, fontSize: 11 }}>No terminal session.</text>
+        : null}
       <div
         ref={(instance: { id: number } | null) => { inputId.current = instance?.id }}
         testId={'terminal-input-' + placement}

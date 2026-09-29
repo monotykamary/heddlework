@@ -124,6 +124,25 @@ HEDDLEWORK_HOST_PRINT_TOKEN=1 bun run host -- /path/to/repository
 
 For rebuild-on-save development, use `bun run dev:web -- /path/to/repository` (optionally with `HEDDLEWORK_DEMO=1`). Open the printed `http://127.0.0.1:4817/#token=…` URL. Non-loopback access additionally requires `HEDDLEWORK_HOST_ALLOW_NETWORK=1` and exact `HEDDLEWORK_HOST_ORIGINS`; use HTTPS before sending pairing credentials over an untrusted network. See [Community web port](docs/community-web-port.md) for runnable LAN/TLS setups, authentication, terminal architecture, validation scope, source attribution, and current mobile limitations.
 
+### Remote host over SSH
+
+To use a host on another machine or cloud VM without exposing it to the network, keep it on its default loopback bind and tunnel to it from the machine running the browser:
+
+```bash
+bun run ssh -- user@devbox
+bun run ssh -- --start --remote-dir '~/src/heddlework' --workspace '~/src/project' user@devbox
+```
+
+The helper opens `ssh -L` to the remote host's port (`--remote-port`, default 4817), reads the remote host token over SSH, checks that the page and a WebSocket handshake work through the tunnel, and prints a `http://127.0.0.1:<port>/#host=…&token=…` pairing link. Each target keeps the same local port across runs (override with `--local-port`) so browser storage and the offline shell stay with that host. It reconnects with backoff if SSH drops; Ctrl-C closes the tunnel. `--start` launches `bun src/host/main.ts` detached in the remote checkout (which needs `bun run build:web`) when nothing answers yet, and logs to the host state directory. SSH runs with `BatchMode=yes`, so use keys or an agent; pass other SSH settings with `-o KEY=VALUE` or `-F FILE`. A host bound to a non-loopback address rejects the tunnel's origin unless `HEDDLEWORK_HOST_ORIGINS` includes the printed `http://127.0.0.1:<port>`.
+
+The native desktop window can drive the same remote host directly, with the same options:
+
+```bash
+bun run remote -- user@devbox
+```
+
+It opens the tunnel, then renders the workbench against the remote host: sessions, transcripts, the composer, the diff panel, and terminals all run on the remote machine, and the window reconnects when SSH or the host restarts. Closing the window closes the tunnel. Flows and the embedded browser are not yet available in remote mode, and it runs from a source checkout (after `bun run setup:native`), not the packaged app.
+
 ### Container workspace host
 
 `Dockerfile` builds that same host — Bun, Node, Pi, and pi-fabric — without the Rust/GPUIX toolchain, so any machine with Docker can serve the browser client:
