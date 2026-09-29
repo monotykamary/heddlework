@@ -33,6 +33,24 @@ services:
       HEDDLEWORK_OPENAI_API: ${HEDDLEWORK_OPENAI_API:-openai-completions}
       HEDDLEWORK_OPENAI_NAME: ${HEDDLEWORK_OPENAI_NAME:-custom-openai}
       HEDDLEWORK_OPENAI_KEY: ${HEDDLEWORK_OPENAI_KEY:-}
+      # Optional: HTTP Basic auth, for an endpoint or proxy that asks for a
+      # username and password rather than a key. Set both together; they replace
+      # HEDDLEWORK_OPENAI_KEY.
+      HEDDLEWORK_OPENAI_USERNAME: ${HEDDLEWORK_OPENAI_USERNAME:-}
+      HEDDLEWORK_OPENAI_PASSWORD: ${HEDDLEWORK_OPENAI_PASSWORD:-}
+      # The endpoint is probed at startup; warn (default here) logs a bad URL or
+      # model id instead of refusing to boot, require makes it fatal, off skips.
+      HEDDLEWORK_OPENAI_CHECK: ${HEDDLEWORK_OPENAI_CHECK:-warn}
+      # Seconds Pi may take to answer through the endpoint (a cold local model
+      # can be slower to load than the probe's own timeout).
+      HEDDLEWORK_OPENAI_ANSWER_TIMEOUT: ${HEDDLEWORK_OPENAI_ANSWER_TIMEOUT:-60}
+      # A tool call is proved too, since chat alone cannot drive an agent
+      # session; follows HEDDLEWORK_OPENAI_CHECK unless set here.
+      HEDDLEWORK_OPENAI_TOOL_CHECK: ${HEDDLEWORK_OPENAI_TOOL_CHECK:-}
+      # And a whole agent turn — Pi reads a scratch file and edits it — since a
+      # session that cannot carry an edit through does nothing in an editor;
+      # follows HEDDLEWORK_OPENAI_TOOL_CHECK unless set here.
+      HEDDLEWORK_OPENAI_AGENT_CHECK: ${HEDDLEWORK_OPENAI_AGENT_CHECK:-}
       # API keys are read by Pi at runtime; pass only what you use.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

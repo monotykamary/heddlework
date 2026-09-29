@@ -55,7 +55,7 @@ LABEL org.opencontainers.image.title="heddlework" \
       org.opencontainers.image.licenses="MIT"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git ripgrep util-linux \
+ && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep util-linux \
  && rm -rf /var/lib/apt/lists/*
 
 # Node runs the Pi sidecar; the launcher is a stable wrapper around the
@@ -89,7 +89,8 @@ RUN chmod 755 /usr/local/bin/entrypoint.sh
 
 # A custom OpenAI-compatible endpoint is configured by the installer's
 # config-only mode, so the container and a desktop install write the same
-# models.json instead of drifting apart.
+# models.json instead of drifting apart. curl above is what lets that mode
+# probe the endpoint (HEDDLEWORK_OPENAI_CHECK) the way the entrypoint does.
 COPY install.sh /opt/heddlework/install.sh
 
 # The entrypoint starts as root only to drop privileges (HOST_UID/HOST_GID
